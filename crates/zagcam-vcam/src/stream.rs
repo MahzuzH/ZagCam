@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use zagcam_vcam_shared::{FPS, FrameChannel, nv12_len, now_ms};
+use zagcam_vcam_shared::{FPS, FrameChannel, fill_test_pattern, nv12_len, now_ms};
 use windows::Win32::Foundation::S_OK;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
@@ -16,6 +16,8 @@ use crate::log::vlog;
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
 const CHANNEL_RETRY_MS: u64 = 1000;
+/// Keep the last live frame through a transient read miss instead of flashing the pattern.
+const LIVE_HOLD_MS: u64 = 250;
 
 #[implement(IMFMediaStream2)]
 pub struct MediaStream {
@@ -35,21 +37,8 @@ struct State {
     channel_attempt_ms: Option<u64>,
     last_delivery: Option<Instant>,
     served: u64,
-}
-
-/// Neutral-chroma test pattern with a moving bar: what clients see while ZagCam has no live frame.
-fn fill_test_pattern(frame: &mut [u8], width: u32, height: u32, tick: u64) {
-    let luma = width as usize * height as usize;
-    let offset = (tick / 16) as usize % width.max(1) as usize;
-    for y in 0..height as usize {
-        let row = &mut frame[y * width as usize..(y + 1) * width as usize];
-        for (x, value) in row.iter_mut().enumerate() {
-            let gradient = (x * 200 / width.max(1) as usize) as u8 + 16;
-            let in_bar = ((x + offset) % width.max(1) as usize) < (width as usize / 16).max(1);
-            *value = if in_bar { 235 } else { gradient };
-        }
-    }
-    frame[luma..].fill(128);
+    last_live: Option<bool>,
+    live_tick_ms: u64,
 }
 
 impl MediaStream {
@@ -67,6 +56,8 @@ impl MediaStream {
                 channel_attempt_ms: None,
                 last_delivery: None,
                 served: 0,
+                last_live: None,
+                live_tick_ms: 0,
             }),
         }))
     }
@@ -87,6 +78,8 @@ impl MediaStream {
         state.frame = vec![0; nv12_len(width, height)];
         state.stream_state = MF_STREAM_STATE_RUNNING;
         state.served = 0;
+        state.last_live = None;
+        state.live_tick_ms = 0;
         unsafe {
             queue.QueueEventParamVar(MEStreamStarted.0 as u32, &GUID::zeroed(), S_OK, &PROPVARIANT::default())
         }
@@ -134,12 +127,22 @@ impl State {
     fn render(&mut self) -> bool {
         self.ensure_channel();
         let (width, height) = (self.width, self.height);
-        let live = self.channel.as_ref().is_some_and(|channel| {
+        let now = now_ms();
+        let mut live = self.channel.as_ref().is_some_and(|channel| {
             channel.announce_consumer(width, height);
             channel.read_frame(width, height, &mut self.frame)
         });
-        if !live {
-            fill_test_pattern(&mut self.frame, width, height, now_ms());
+        if live {
+            self.live_tick_ms = now;
+        } else if self.live_tick_ms != 0 && now.saturating_sub(self.live_tick_ms) <= LIVE_HOLD_MS {
+            // Keep the last live frame through a transient miss.
+            live = true;
+        } else {
+            fill_test_pattern(&mut self.frame, width, height, now);
+        }
+        if self.last_live != Some(live) {
+            vlog!("source is now {}", if live { "live (engine frames)" } else { "the test pattern" });
+            self.last_live = Some(live);
         }
         live
     }

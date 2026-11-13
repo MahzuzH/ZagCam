@@ -20,39 +20,26 @@ Conventions for every sprint:
 | 1 — provider skeleton | done | `zagcam-vcam` / `zagcam-vcam-shared` crates; DLL registers; test pattern |
 | 2 — camera lifecycle | done | `MFCreateVirtualCamera` wrapper + `zagcam vcam start/stop/status/install/uninstall`; camera enumerates and streams |
 | 3 — frame transport | done | seq-lock channel tests + `vcam watch`; user-space `open()` of the `Global\` section proven |
-| 4 — provider reads the channel | next | real frames from an external producer reach the camera |
-| 5 — engine integration | todo | blurred webcam feed into the camera; open camera only while consumed |
+| 4 — provider reads the channel | done | real frames from an external producer reach the camera; live/pattern transitions verified |
+| 5 — engine integration | next | blurred webcam feed into the camera; open camera only while consumed |
 | 6 — hardening and uninstall | todo | compatibility matrix, soak, clean uninstall |
 
-### Sprint 4 — provider serves real frames
+### Sprint 4 — provider serves real frames (done)
 
-The provider already calls `FrameChannel::read_frame`; this sprint proves an external process can
-feed it and the frames pass through unchanged.
+Result: `zagcam vcam feed` publishes NV12 into the channel; the provider serves those frames and
+falls back to the test pattern when the feed stops. Verified with `vcam watch`
+(`engine frame: 1280x720, fresh` while feeding, `stale` after) and the provider log
+(`source is now live (engine frames)` / `source is now the test pattern`). A short "hold last live
+frame" window (250 ms) stops transient read misses from flashing the fallback pattern.
 
-Work:
+Implemented notes:
 
-1. Add a test producer (reuse `zagcam vcam` or a dev subcommand) that opens the production
-   `Global\ZagCamVirtualCamera` channel and publishes NV12 frames with a moving pattern.
-2. Confirm the camera serves the producer's frames instead of the built-in test pattern, and
-   falls back to the test pattern when the producer stops (`producer_is_fresh` false).
-3. Verify the resolution handshake: the provider announces the client-selected size, the
-   producer writes that size (currently 1280x720, 1920x1080, 640x480 are offered).
-4. Optional: measure copy throughput; a 1080p NV12 frame is ~3.1 MB, so 30 fps is ~93 MB/s.
-5. Cross-check timestamps still use `MFGetSystemTime` (QPC-derived, 100 ns units).
-
-Gate:
-
-- `ffmpeg -f dshow -i video="ZagCam Camera (Windows Virtual Camera)" -t 5 test.mp4` (or the Windows
-  Camera app) shows the producer's pattern while the producer runs.
-- Stopping the producer makes the camera fall back to the static test pattern (no frozen frame).
-- Provider log `%ProgramData%\ZagCam\vcam-LOCAL_SERVICE.log` shows `first sample (live)`.
-
-Risks:
-
-- `Global\` section creation needs SeCreateGlobalPrivilege; only the Frame Server provider
-  creates it — the engine/producer only opens. Keep it that way.
-- Single-slot channel: a fast producer can overwrite mid-read; `read_frame` retries and rejects
-  torn reads, but heavy contention could cause the provider to miss frames.
+- The NV12 fallback pattern moved to `zagcam-vcam-shared` (`fill_test_pattern`), shared by the
+  provider and available to other producers.
+- `zagcam vcam feed` opens (never creates) the channel, polls `active_request()` for the client's
+  size, and writes an animated color-bar pattern while a client reads.
+- `read_frame` rejects torn reads and retries briefly; the provider holds the last live frame for
+  250 ms before reverting.
 
 ### Sprint 5 — engine integration (blurred frames into the camera)
 

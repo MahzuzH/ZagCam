@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use zagcam_vcam_shared::{CLSID_STRING, FRIENDLY_NAME, FrameChannel};
+use zagcam_vcam_shared::{CLSID_STRING, FRIENDLY_NAME};
 use windows::core::PCWSTR;
 use windows::Win32::Media::MediaFoundation::{
     IMFVirtualCamera, MF_VERSION, MFCreateVirtualCamera, MFStartup, MFVirtualCameraAccess_CurrentUser,
@@ -176,3 +176,4 @@ pub fn status() -> Status {
 }
 
 pub use zagcam_vcam_shared::FRIENDLY_NAME as CAMERA_NAME;
+pub use zagcam_vcam_shared::FrameChannel;

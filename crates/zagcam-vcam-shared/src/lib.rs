@@ -51,6 +51,22 @@ pub fn now_ms() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// Neutral-chroma test pattern with a moving bar: the fallback a media source shows while no
+/// engine frame is available. `tick` is a millisecond clock, so the pattern is deterministic.
+pub fn fill_test_pattern(frame: &mut [u8], width: u32, height: u32, tick: u64) {
+    let luma = width as usize * height as usize;
+    let offset = (tick / 16) as usize % width.max(1) as usize;
+    for y in 0..height as usize {
+        let row = &mut frame[y * width as usize..(y + 1) * width as usize];
+        for (x, value) in row.iter_mut().enumerate() {
+            let gradient = (x * 200 / width.max(1) as usize) as u8 + 16;
+            let in_bar = ((x + offset) % width.max(1) as usize) < (width as usize / 16).max(1);
+            *value = if in_bar { 235 } else { gradient };
+        }
+    }
+    frame[luma..].fill(128);
+}
+
 #[repr(C)]
 struct Header {
     magic: AtomicU32,
@@ -274,7 +290,7 @@ impl FrameChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameChannel, STALE_AFTER_MS, nv12_len, now_ms};
+    use super::{FrameChannel, STALE_AFTER_MS, fill_test_pattern, nv12_len, now_ms};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A `Local\` channel with a unique name, safe to create as a normal user and in parallel tests.
@@ -341,5 +357,20 @@ mod tests {
 
         channel.set_consumer_tick(now_ms().saturating_sub(STALE_AFTER_MS + 1000));
         assert_eq!(channel.active_request(), None);
+    }
+
+    #[test]
+    fn test_pattern_fills_luma_and_neutral_chroma() {
+        let (width, height) = (64, 48);
+        let mut first = vec![0u8; nv12_len(width, height)];
+        fill_test_pattern(&mut first, width, height, 0);
+
+        let luma = (width * height) as usize;
+        assert!(first[..luma].iter().any(|&b| b != 0), "luma should vary");
+        assert!(first[luma..].iter().all(|&b| b == 128), "chroma should be neutral");
+
+        let mut later = vec![0u8; nv12_len(width, height)];
+        fill_test_pattern(&mut later, width, height, 160);
+        assert_ne!(first, later, "the moving bar should change over time");
     }
 }

@@ -133,6 +133,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\vcam\install-dev.ps1   # admin,
 cargo run --release -- vcam status        # registered DLL + whether a source is live
 cargo run --release -- vcam start         # create the camera (Ctrl+C removes it)
 cargo run --release -- vcam watch         # show the shared frame channel state
+cargo run --release -- vcam feed          # publish test frames (dev check the camera serves them)
 cargo run --release -- --list             # virtual cameras are marked "(virtual)"
 ```
 

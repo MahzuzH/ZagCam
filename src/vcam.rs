@@ -2,8 +2,9 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use zagcam_vcam_mgr::{CAMERA_NAME, VirtualCamera};
+use zagcam_vcam_mgr::{CAMERA_NAME, FrameChannel, VirtualCamera};
 
 const USAGE: &str = "Usage: zagcam vcam <command>
 
@@ -12,6 +13,7 @@ Commands:
   stop                 stop and remove a session camera created by another process
   status               show whether the media source is registered and if a source is live
   watch [--seconds N]  show the shared frame channel state (client resolution, engine freshness)
+  feed [--seconds N]   publish test frames into the channel (dev check that the camera serves them)
   install              register the provider DLL (needs an elevated shell)
   uninstall            unregister the provider DLL (needs an elevated shell)";
 
@@ -25,6 +27,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "stop" => stop(),
         "status" => status(),
         "watch" => watch(&args[1..]),
+        "feed" => feed(&args[1..]),
         "install" => register(&args[1..], false),
         "uninstall" => register(&args[1..], true),
         "help" | "--help" | "-h" => {
@@ -94,6 +97,109 @@ fn watch(args: &[String]) -> Result<(), String> {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+fn feed(args: &[String]) -> Result<(), String> {
+    let seconds = parse_seconds(args)?;
+    println!("waiting for the virtual camera channel (run `zagcam vcam start` and open the camera)...");
+    let channel = open_channel_with_retry()?;
+    println!("channel open; publishing test frames while a client reads");
+
+    let start = Instant::now();
+    let mut last: Option<(u32, u32)> = None;
+    loop {
+        match channel.active_request() {
+            Some((w, h)) => {
+                if last != Some((w, h)) {
+                    println!("feeding {w}x{h}");
+                    last = Some((w, h));
+                }
+                let tick = producer_now_ms();
+                channel.write_frame(w, h, |out| fill_producer_pattern(out, w, h, tick));
+            }
+            None => {
+                if last.take().is_some() {
+                    println!("no client reading; idle");
+                }
+            }
+        }
+        if seconds.is_some_and(|limit| start.elapsed().as_secs_f64() >= limit) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(33));
+    }
+}
+
+fn open_channel_with_retry() -> Result<FrameChannel, String> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(channel) = FrameChannel::open() {
+            return Ok(channel);
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "the shared channel never appeared; is `zagcam vcam start` running and an app reading the camera?"
+                    .into(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn producer_now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Distinct NV12 pattern for the dev feed: moving color bars plus a travelling bright block, so a
+/// live feed is obviously different from the provider's fallback pattern.
+fn fill_producer_pattern(frame: &mut [u8], width: u32, height: u32, tick: u64) {
+    let (w, h) = (width as usize, height as usize);
+    let luma = w * h;
+    let phase = (tick / 40) as usize;
+    for y in 0..h {
+        for x in 0..w {
+            let bar = ((x * 8 / w.max(1)) + phase) % 8;
+            frame[y * w + x] = match bar {
+                0 => 40,
+                1 => 90,
+                2 => 140,
+                3 => 190,
+                4 => 70,
+                5 => 120,
+                6 => 170,
+                7 => 220,
+                _ => 128,
+            };
+        }
+    }
+    // Travelling white block in the luma plane.
+    let block = w / 8;
+    let bx = (tick / 8) as usize % (w + block);
+    for y in (h / 3)..(h / 3 + block).min(h) {
+        for x in bx..(bx + block).min(w) {
+            frame[y * w + x] = 235;
+        }
+    }
+    // Chroma bars (U/V interleaved, half resolution).
+    let cw = w / 2;
+    for y in 0..h / 2 {
+        for x in 0..cw {
+            let bar = ((x * 8 / cw.max(1)) + phase) % 8;
+            let (u, v) = match bar {
+                0 => (128, 128),
+                1 => (90, 200),
+                2 => (200, 90),
+                3 => (128, 255),
+                4 => (255, 128),
+                5 => (90, 90),
+                6 => (200, 200),
+                _ => (160, 40),
+            };
+            let i = luma + y * w + x * 2;
+            frame[i] = u;
+            frame[i + 1] = v;
+        }
     }
 }
 
