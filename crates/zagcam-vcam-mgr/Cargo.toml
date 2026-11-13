@@ -1,0 +1,14 @@
+[package]
+name = "zagcam-vcam-mgr"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+zagcam-vcam-shared = { path = "../zagcam-vcam-shared" }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+] }

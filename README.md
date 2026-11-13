@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M1 done.** Capture plus background blur (ONNX segmentation, smoothed mask, blur composite), preview window and an optional virtual-camera sink (see [Build and usage](#build-and-usage)). Own provider, UI and image/video backgrounds still to come.
+**Status: M1 done, M2 in progress.** Capture, background blur, and an own Media Foundation virtual camera that currently streams a test pattern (see [Build and usage](#build-and-usage)). Wiring the engine's blurred frames into that camera is next.
 
 ## Why
 
@@ -95,7 +95,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
-3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams.
+3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: provider + registration + test pattern done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand.
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
@@ -122,7 +122,27 @@ Prefer `--release`: debug builds are an order of magnitude slower.
 needed. It expects a 256x144 RGB input scaled to 0..1 and outputs a person mask; see
 [models/LICENSE](models/LICENSE).
 
-### Virtual camera output
+### Own virtual camera (M2, in progress)
+
+ZagCam has its own Media Foundation virtual camera (no OBS needed). Register the provider DLL
+once, then start the camera:
+
+```sh
+cargo build -p zagcam-vcam --release
+powershell -ExecutionPolicy Bypass -File .\tools\vcam\install-dev.ps1   # admin, once
+cargo run --release -- vcam status        # registered DLL + whether a source is live
+cargo run --release -- vcam start         # create the camera (Ctrl+C removes it)
+cargo run --release -- --list             # virtual cameras are marked "(virtual)"
+```
+
+For now the provider shows a built-in test pattern; the engine starts feeding it in a later
+step. The camera is session-scoped, so it disappears when the process exits. `vcam stop`
+removes a session camera created by another process.
+
+`cargo run --release -- --camera N --probe 5` can read the virtual camera back as an input,
+which is a quick end-to-end check.
+
+### OBS virtual camera (fallback)
 
 `--sink vcam` needs a virtual-camera filter registered with Windows. The `virtualcam` crate
 (Apache-2.0, `virtualcam 0.1.1`) uses the **OBS Virtual Camera** filter, so install OBS Studio

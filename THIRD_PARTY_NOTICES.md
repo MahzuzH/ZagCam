@@ -8,7 +8,8 @@ notices are retained below.
 - Source: https://github.com/pdinsd/CamLights
 - License: Apache License 2.0
 - Used by: `crates/zagcam-vcam` and `crates/zagcam-vcam-shared` are adapted from
-  `crates/camlights-vcam` and `crates/camlights-vcam-shared`.
+  `crates/camlights-vcam` and `crates/camlights-vcam-shared`; `crates/zagcam-vcam-mgr` is
+  adapted from `crates/camlights/src/vcam.rs`.
 
 ```
 Copyright 2025 the CamLights authors

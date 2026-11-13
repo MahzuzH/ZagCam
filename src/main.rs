@@ -3,6 +3,7 @@ mod pipeline;
 mod segmenter;
 mod sink;
 mod stats;
+mod vcam;
 
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
@@ -28,6 +29,9 @@ Options:
   --model PATH      ONNX segmentation model
   --probe S         run S seconds headless, print fps / RAM / CPU
   --help, -h        show this help
+
+Commands:
+  vcam <cmd>        manage the virtual camera (start, stop, status, install, uninstall)
 
 Keys: Esc quits the preview window.";
 
@@ -66,11 +70,18 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args()?;
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("vcam") {
+        argv.remove(0);
+        return vcam::run(&argv);
+    }
+    let args = parse_args(argv)?;
     if args.list {
         let cameras = capture::list()?;
         for (i, cam) in cameras.iter().enumerate() {
-            println!("{i}: {} [{}]", cam.human_name(), cam.index().as_index().unwrap_or(0));
+            let name = cam.human_name();
+            let kind = if name.to_ascii_lowercase().contains("virtual camera") { " (virtual)" } else { "" };
+            println!("{i}: {name} [{}]{kind}", cam.index().as_index().unwrap_or(0));
         }
         return Ok(());
     }
@@ -107,7 +118,7 @@ fn run() -> Result<(), String> {
     run_loop(&mut camera, &mut rgb, pipeline.as_mut(), output.as_mut())
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args(argv: Vec<String>) -> Result<Args, String> {
     let mut args = Args {
         list: false,
         camera: None,
@@ -117,7 +128,7 @@ fn parse_args() -> Result<Args, String> {
         model: PathBuf::from(DEFAULT_MODEL),
         probe: None,
     };
-    let mut raw = std::env::args().skip(1);
+    let mut raw = argv.into_iter();
     while let Some(arg) = raw.next() {
         let mut value = || raw.next().ok_or_else(|| format!("{arg} needs a value"));
         match arg.as_str() {

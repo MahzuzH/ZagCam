@@ -5,7 +5,7 @@ edition = "2024"
 
 [workspace]
 resolver = "2"
-members = [".", "crates/zagcam-vcam-shared", "crates/zagcam-vcam"]
+members = [".", "crates/zagcam-vcam-shared", "crates/zagcam-vcam", "crates/zagcam-vcam-mgr"]
 
 [features]
 default = []
@@ -18,6 +18,7 @@ ort = "2.0.0-rc.15"
 fast_image_resize = { version = "6", features = ["rayon"] }
 rayon = "1"
 virtualcam = { version = "0.1.1", optional = true, default-features = false, features = ["obs"] }
+zagcam-vcam-mgr = { path = "crates/zagcam-vcam-mgr" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
