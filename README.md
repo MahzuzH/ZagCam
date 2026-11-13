@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: design stage.** Only the product spec exists ([PRD.md](PRD.md)). No build yet.
+**Status: M0 done.** Webcam capture prototype with baseline measurement (see [Build and usage](#build-and-usage)). Blur and virtual camera still to come.
 
 ## Why
 
@@ -93,7 +93,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 ## Roadmap
 
-1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured.
+1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation.
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams.
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand.
@@ -103,7 +103,18 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 ## Build and usage
 
-Not available yet. See the roadmap above.
+M0 is a capture prototype: it opens a webcam, decodes frames, and shows them in a window. No blur or virtual camera yet.
+
+```sh
+cargo run --release -- --list          # list cameras
+cargo run --release --                 # preview the first camera (Esc quits)
+cargo run --release -- --camera 1      # preview camera 1
+cargo run --release -- --probe 5       # capture 5 s headless and print fps / RAM / CPU
+```
+
+Prefer `--release`: the debug build is several times slower because of MJPEG/NV12 decoding.
+
+Baseline measured on the reference laptop (1280x720 NV12, release build): ~29 fps, ~17 MiB working set, ~25-35% of one CPU core for capture and decode only. Media Foundation reports a bogus 1 fps in the media type, so trust the measured fps, not the printed format line.
 
 ## License and name
 
