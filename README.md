@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M0 done.** Webcam capture prototype with baseline measurement (see [Build and usage](#build-and-usage)). Blur and virtual camera still to come.
+**Status: M1 done.** Capture plus background blur (ONNX segmentation, smoothed mask, blur composite), preview window and an optional virtual-camera sink (see [Build and usage](#build-and-usage)). Own provider, UI and image/video backgrounds still to come.
 
 ## Why
 
@@ -84,8 +84,8 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 - **Language:** Rust
 - **Capture:** `nokhwa`
-- **Inference:** `ort` (ONNX Runtime), MediaPipe Selfie Segmentation as the starting model
-- **Compositing:** CPU with SIMD (`fast_image_resize`); `wgpu` as an optional GPU path
+- **Inference:** `ort` (ONNX Runtime), MediaPipe Selfie Segmentation (landscape, 256x144) as the starting model
+- **Compositing:** CPU with SIMD (`fast_image_resize`) and `rayon`; `wgpu` as an optional GPU path
 - **GIF decoding:** `gif` / `image`, frames kept at native GIF resolution
 - **Windows API:** `windows` crate, `MFCreateVirtualCamera`
 - **UI:** tray app with `egui` or `iced`
@@ -94,7 +94,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 ## Roadmap
 
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
-2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation.
+2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams.
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand.
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
@@ -103,18 +103,46 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 ## Build and usage
 
-M0 is a capture prototype: it opens a webcam, decodes frames, and shows them in a window. No blur or virtual camera yet.
+M1 opens a webcam and can blur the background with a MediaPipe selfie-segmentation ONNX model, then show the result in a preview window or feed an OBS virtual camera.
 
 ```sh
-cargo run --release -- --list          # list cameras
-cargo run --release --                 # preview the first camera (Esc quits)
-cargo run --release -- --camera 1      # preview camera 1
-cargo run --release -- --probe 5       # capture 5 s headless and print fps / RAM / CPU
+cargo run --release -- --list                  # list cameras
+cargo run --release --                         # preview the first camera, no effect (Esc quits)
+cargo run --release -- --mode blur             # preview with background blur
+cargo run --release -- --mode blur --blur 80   # stronger blur (0..100)
+cargo run --release -- --probe 5 --mode blur   # headless, print fps / RAM / CPU and per-stage ms
+cargo run --release -- --sink vcam --features sink-vcam   # feed the virtual camera
 ```
 
-Prefer `--release`: the debug build is several times slower because of MJPEG/NV12 decoding.
+Prefer `--release`: debug builds are an order of magnitude slower.
 
-Baseline measured on the reference laptop (1280x720 NV12, release build): ~29 fps, ~17 MiB working set, ~25-35% of one CPU core for capture and decode only. Media Foundation reports a bogus 1 fps in the media type, so trust the measured fps, not the printed format line.
+### Model
+
+`models/selfie_segmentation_landscape.onnx` (Apache-2.0) is committed, so no download step is
+needed. It expects a 256x144 RGB input scaled to 0..1 and outputs a person mask; see
+[models/LICENSE](models/LICENSE).
+
+### Virtual camera output
+
+`--sink vcam` needs a virtual-camera filter registered with Windows. The `virtualcam` crate
+(Apache-2.0, `virtualcam 0.1.1`) uses the **OBS Virtual Camera** filter, so install OBS Studio
+once (OBS itself does not need to run). Without it the app prints a clear error and the build
+feature `sink-vcam` is off by default.
+
+### Baselines (reference laptop, 1280x720 NV12, release)
+
+| Mode | fps | Working set | CPU (1 core = 100%) |
+| --- | --- | --- | --- |
+| off (capture only) | ~29 | ~19 MiB | ~33% |
+| blur | ~29 | ~55 MiB | ~186% (~1.9 cores) |
+
+Blur per frame: preprocess ~1.7 ms, inference ~4 ms (every 2nd frame), mask ~1.9 ms, blur ~3.5 ms,
+composite ~1.9 ms. Resizing and compositing use `rayon`, so the blur path uses about two cores to
+keep 30 fps. The CPU budget in the PRD (~8% of a 4-core laptop) is **not** met yet; capture/decode
+and the CPU-only model are the main costs, and reducing them is M4 work.
+
+Media Foundation reports a bogus 1 fps in the media type, so trust the measured fps, not the
+printed format line.
 
 ## License and name
 
