@@ -3,6 +3,10 @@ name = "ZagCam"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+resolver = "2"
+members = [".", "crates/zagcam-vcam-shared", "crates/zagcam-vcam"]
+
 [features]
 default = []
 sink-vcam = ["dep:virtualcam"]
@@ -26,5 +30,6 @@ windows-sys = { version = "0.61", features = [
 opt-level = "s"
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
+# `panic = "abort"` is intentionally not set: the camera provider runs inside the Windows Frame
+# Server service and must unwind into the COM method's Result instead of killing the service.
