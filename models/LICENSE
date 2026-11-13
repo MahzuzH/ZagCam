@@ -1,0 +1,10 @@
+MediaPipe Selfie Segmentation (landscape)
+
+Model file : models/selfie_segmentation_landscape.onnx
+Source     : https://huggingface.co/onnx-community/mediapipe_selfie_segmentation_landscape
+Revision   : 2497d5bec26c626c7b3c4edc6e1fefc21b64f6c3
+sha256     : 7A0ADCFDB1715D3B0FF0F61486D8A181C33F4A208343A5ABFCCBC6540E872D24
+
+The model is a conversion of Google's MediaPipe Selfie Segmentation and is
+distributed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0

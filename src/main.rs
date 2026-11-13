@@ -1,27 +1,59 @@
-#![cfg_attr(not(windows), allow(unused))]
-
+mod capture;
+mod pipeline;
+mod segmenter;
+mod sink;
 mod stats;
 
-use minifb::{Key, Window, WindowOptions};
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraFormat, FrameFormat, RequestedFormat, RequestedFormatType};
-use nokhwa::{query, Camera};
+use nokhwa::Camera;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-const MAX_W: usize = 1280;
-const MAX_H: usize = 720;
+use pipeline::Pipeline;
+use segmenter::Segmenter;
+use sink::{Sink, WindowSink};
 
-const USAGE: &str = "ZagCam M0 capture prototype
+const USAGE: &str = "ZagCam - lightweight virtual camera
 
 Usage:
-  zagcam              open the first camera
-  zagcam --camera N   open camera number N (see --list)
-  zagcam --list       list available cameras
-  zagcam --probe S    capture for S seconds without a window, print baseline
-  zagcam --help       show this help
+  zagcam [options]
 
-Keys: Esc quits.";
+Options:
+  --camera N        camera number to open (see --list, default 0)
+  --list, -l        list available cameras
+  --mode off|blur   effect (default off)
+  --blur 0..100     blur intensity (default 50)
+  --sink window|vcam  output: preview window or virtual camera (default window)
+  --model PATH      ONNX segmentation model
+  --probe S         run S seconds headless, print fps / RAM / CPU
+  --help, -h        show this help
+
+Keys: Esc quits the preview window.";
+
+const DEFAULT_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Off,
+    Blur,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SinkKind {
+    Window,
+    Vcam,
+}
+
+struct Args {
+    list: bool,
+    camera: Option<usize>,
+    mode: Mode,
+    blur: u8,
+    sink: SinkKind,
+    model: PathBuf,
+    probe: Option<f64>,
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -34,114 +66,138 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mut list = false;
-    let mut pick = None;
-    let mut probe = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--list" | "-l" => list = true,
-            "--camera" | "-c" => {
-                let raw = args.next().ok_or("--camera needs an index")?;
-                pick = Some(raw.parse::<usize>().map_err(|_| format!("bad camera index {raw}"))?);
-            }
-            "--probe" => {
-                let raw = args.next().ok_or("--probe needs a number of seconds")?;
-                probe = Some(raw.parse::<f64>().map_err(|_| format!("bad probe duration {raw}"))?);
-            }
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
-            other => return Err(format!("unknown argument {other}\n\n{USAGE}")),
-        }
-    }
-
-    let cameras = query(ApiBackend::Auto).map_err(|why| format!("camera query failed: {why}"))?;
-    if cameras.is_empty() {
-        return Err("no camera found".into());
-    }
-    if list {
+    let args = parse_args()?;
+    if args.list {
+        let cameras = capture::list()?;
         for (i, cam) in cameras.iter().enumerate() {
             println!("{i}: {} [{}]", cam.human_name(), cam.index().as_index().unwrap_or(0));
         }
         return Ok(());
     }
-    let source = match pick {
+
+    let cameras = capture::list()?;
+    if cameras.is_empty() {
+        return Err("no camera found".into());
+    }
+    let source = match args.camera {
         Some(i) => cameras.get(i).ok_or_else(|| format!("camera {i} not found"))?,
         None => &cameras[0],
     };
 
-    let mut camera = open(source.index())?;
+    let mut camera = capture::open(source.index())?;
     let format = camera.camera_format();
     let (sw, sh) = (format.width() as usize, format.height() as usize);
-    let (dw, dh) = fit(sw, sh, MAX_W, MAX_H);
-    println!(
-        "source: {} | {}x{} {}",
-        source.human_name(),
-        sw,
-        sh,
-        format.format()
-    );
+    println!("source: {} | {}x{} {}", source.human_name(), sw, sh, format.format());
 
     let mut rgb = vec![0u8; sw * sh * 3];
 
-    if let Some(secs) = probe {
-        let mut sampler = stats::Sampler::new();
-        let start = Instant::now();
-        let mut frames: u64 = 0;
-        while start.elapsed().as_secs_f64() < secs {
-            let frame = camera.frame().map_err(|why| format!("capture failed: {why}"))?;
-            frame
-                .decode_image_to_buffer::<RgbFormat>(&mut rgb)
-                .map_err(|why| format!("decode failed: {why}"))?;
-            frames += 1;
+    let mut pipeline = match args.mode {
+        Mode::Off => None,
+        Mode::Blur => {
+            let segmenter = Segmenter::load(&args.model)?;
+            Some(Pipeline::new(segmenter, sw, sh, args.blur)?)
         }
-        let elapsed = start.elapsed().as_secs_f64();
-        let snap = sampler.snapshot();
-        println!(
-            "M0 baseline: {:.1} fps over {:.1}s | working set {:.1} MiB | CPU {:.1}% of one core",
-            frames as f64 / elapsed,
-            elapsed,
-            snap.working_set as f64 / 1_048_576.0,
-            snap.cpu_percent
-        );
-        return Ok(());
+    };
+
+    if let Some(secs) = args.probe {
+        return probe(&mut camera, &mut rgb, secs, pipeline.as_mut());
     }
 
-    let mut window = Window::new("ZagCam", dw, dh, WindowOptions { resize: true, ..Default::default() })
-        .map_err(|why| format!("window failed: {why}"))?;
+    let mut output = make_sink(args.sink, sw, sh)?;
+    run_loop(&mut camera, &mut rgb, pipeline.as_mut(), output.as_mut())
+}
 
-    let mut pixels = vec![0u32; dw * dh];
-    let xs: Vec<usize> = (0..dw).map(|x| x * sw / dw).collect();
-    let ys: Vec<usize> = (0..dh).map(|y| y * sh / dh).collect();
+fn parse_args() -> Result<Args, String> {
+    let mut args = Args {
+        list: false,
+        camera: None,
+        mode: Mode::Off,
+        blur: 50,
+        sink: SinkKind::Window,
+        model: PathBuf::from(DEFAULT_MODEL),
+        probe: None,
+    };
+    let mut raw = std::env::args().skip(1);
+    while let Some(arg) = raw.next() {
+        let mut value = || raw.next().ok_or_else(|| format!("{arg} needs a value"));
+        match arg.as_str() {
+            "--list" | "-l" => args.list = true,
+            "--camera" | "-c" => {
+                args.camera = Some(value()?.parse().map_err(|_| "bad camera index".to_string())?);
+            }
+            "--mode" => {
+                args.mode = match value()?.as_str() {
+                    "off" => Mode::Off,
+                    "blur" => Mode::Blur,
+                    other => return Err(format!("unknown mode {other}")),
+                };
+            }
+            "--blur" => {
+                args.blur = value()?.parse().map_err(|_| "bad blur intensity".to_string())?;
+            }
+            "--sink" => {
+                args.sink = match value()?.as_str() {
+                    "window" => SinkKind::Window,
+                    "vcam" => SinkKind::Vcam,
+                    other => return Err(format!("unknown sink {other}")),
+                };
+            }
+            "--model" => args.model = PathBuf::from(value()?),
+            "--probe" => {
+                args.probe = Some(value()?.parse().map_err(|_| "bad probe duration".to_string())?);
+            }
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument {other}\n\n{USAGE}")),
+        }
+    }
+    Ok(args)
+}
 
+fn make_sink(kind: SinkKind, w: usize, h: usize) -> Result<Box<dyn Sink>, String> {
+    match kind {
+        SinkKind::Window => Ok(Box::new(WindowSink::new(w, h)?)),
+        SinkKind::Vcam => {
+            #[cfg(feature = "sink-vcam")]
+            {
+                Ok(Box::new(sink::VcamSink::new(w as u32, h as u32, 30.0)?))
+            }
+            #[cfg(not(feature = "sink-vcam"))]
+            {
+                let _ = (w, h);
+                Err("this build has no virtual-camera output; rebuild with --features sink-vcam".into())
+            }
+        }
+    }
+}
+
+fn run_loop(
+    camera: &mut Camera,
+    rgb: &mut [u8],
+    mut pipeline: Option<&mut Pipeline>,
+    output: &mut dyn Sink,
+) -> Result<(), String> {
     let mut sampler = stats::Sampler::new();
     let start = Instant::now();
     let mut last_stats = Instant::now();
     let mut frames: u64 = 0;
+    let size = camera.camera_format();
+    let (w, h) = (size.width() as usize, size.height() as usize);
 
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        let frame = match camera.frame() {
-            Ok(frame) => frame,
-            Err(why) => {
-                window.set_title(&format!("ZagCam - camera error: {why}"));
-                break;
-            }
+    while output.alive() {
+        next_frame(camera, rgb)?;
+        let present: &[u8] = match pipeline.as_deref_mut() {
+            Some(pipeline) => pipeline.process(rgb)?,
+            None => rgb,
         };
-        frame
-            .decode_image_to_buffer::<RgbFormat>(&mut rgb)
-            .map_err(|why| format!("decode failed: {why}"))?;
-        scale_rgb_to_0rgb(&rgb, sw, &xs, &ys, &mut pixels, dw);
-
-        window
-            .update_with_buffer(&pixels, dw, dh)
-            .map_err(|why| format!("present failed: {why}"))?;
+        output.present(present, w, h)?;
         frames += 1;
 
         if last_stats.elapsed() >= Duration::from_secs(1) {
             let snap = sampler.snapshot();
-            window.set_title(&snap.title(frames, start.elapsed()));
+            output.set_title(&snap.title(frames, start.elapsed()));
             last_stats = Instant::now();
         }
     }
@@ -149,7 +205,7 @@ fn run() -> Result<(), String> {
     let snap = sampler.snapshot();
     let elapsed = start.elapsed().as_secs_f64();
     println!(
-        "M0 baseline: {:.1} fps over {:.1}s | working set {:.1} MiB | CPU {:.1}% of one core",
+        "M1 session: {:.1} fps over {:.1}s | working set {:.1} MiB | CPU {:.1}% of one core",
         frames as f64 / elapsed,
         elapsed,
         snap.working_set as f64 / 1_048_576.0,
@@ -158,63 +214,51 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn open(index: &nokhwa::utils::CameraIndex) -> Result<Camera, String> {
-    let w = MAX_W as u32;
-    let h = MAX_H as u32;
-    let attempts = [
-        CameraFormat::new_from(w, h, FrameFormat::NV12, 30),
-        CameraFormat::new_from(w, h, FrameFormat::MJPEG, 30),
-        CameraFormat::new_from(w, h, FrameFormat::YUYV, 30),
-    ];
-    for guess in attempts {
-        let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(guess));
-        if let Ok(mut camera) = Camera::new(index.clone(), requested)
-            && camera.open_stream().is_ok()
-        {
-            return Ok(camera);
+fn probe(
+    camera: &mut Camera,
+    rgb: &mut [u8],
+    secs: f64,
+    mut pipeline: Option<&mut Pipeline>,
+) -> Result<(), String> {
+    let mut sampler = stats::Sampler::new();
+    let start = Instant::now();
+    let mut frames: u64 = 0;
+    while start.elapsed().as_secs_f64() < secs {
+        next_frame(camera, rgb)?;
+        if let Some(pipeline) = pipeline.as_deref_mut() {
+            pipeline.process(rgb)?;
         }
+        frames += 1;
     }
-    let fallback = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
-    let mut camera =
-        Camera::new(index.clone(), fallback).map_err(|why| format!("cannot open camera: {why}"))?;
-    camera.open_stream().map_err(|why| format!("cannot start stream: {why}"))?;
-    Ok(camera)
+    let elapsed = start.elapsed().as_secs_f64();
+    let snap = sampler.snapshot();
+    println!(
+        "M1 baseline: {:.1} fps over {:.1}s | working set {:.1} MiB | CPU {:.1}% of one core",
+        frames as f64 / elapsed,
+        elapsed,
+        snap.working_set as f64 / 1_048_576.0,
+        snap.cpu_percent
+    );
+    if let Some(pipeline) = pipeline.as_deref()
+        && pipeline.samples > 0
+    {
+        let n = pipeline.samples as f64;
+        let t = pipeline.timings;
+        println!(
+            "  per frame: preprocess {:.2} ms | infer/every-2 {:.2} ms | mask {:.2} ms | blur {:.2} ms | composite {:.2} ms",
+            t.preprocess.as_secs_f64() * 1000.0 / n,
+            t.infer.as_secs_f64() * 1000.0 / n,
+            t.mask.as_secs_f64() * 1000.0 / n,
+            t.blur.as_secs_f64() * 1000.0 / n,
+            t.composite.as_secs_f64() * 1000.0 / n
+        );
+    }
+    Ok(())
 }
 
-fn fit(sw: usize, sh: usize, max_w: usize, max_h: usize) -> (usize, usize) {
-    if sw <= max_w && sh <= max_h {
-        return (sw, sh);
-    }
-    let scale = f64::min(max_w as f64 / sw as f64, max_h as f64 / sh as f64);
-    (((sw as f64 * scale) as usize).max(1), ((sh as f64 * scale) as usize).max(1))
-}
-
-fn scale_rgb_to_0rgb(src: &[u8], sw: usize, xs: &[usize], ys: &[usize], dst: &mut [u32], dw: usize) {
-    for (y, dst_row) in dst.chunks_mut(dw).enumerate() {
-        let src_row = ys[y] * sw;
-        for (x, pixel) in dst_row.iter_mut().enumerate() {
-            let i = (src_row + xs[x]) * 3;
-            *pixel = (u32::from(src[i]) << 16) | (u32::from(src[i + 1]) << 8) | u32::from(src[i + 2]);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{fit, scale_rgb_to_0rgb};
-
-    #[test]
-    fn fit_keeps_small_frames_and_caps_large_ones() {
-        assert_eq!(fit(640, 480, 1280, 720), (640, 480));
-        assert_eq!(fit(1920, 1080, 1280, 720), (1280, 720));
-        assert_eq!(fit(1080, 1920, 1280, 720), (405, 720));
-    }
-
-    #[test]
-    fn scale_maps_top_left_pixel() {
-        let src = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
-        let mut dst = [0u32; 1];
-        scale_rgb_to_0rgb(&src, 2, &[0], &[0], &mut dst, 1);
-        assert_eq!(dst[0], (10 << 16) | (20 << 8) | 30);
-    }
+fn next_frame(camera: &mut Camera, rgb: &mut [u8]) -> Result<(), String> {
+    let frame = camera.frame().map_err(|why| format!("capture failed: {why}"))?;
+    frame
+        .decode_image_to_buffer::<RgbFormat>(rgb)
+        .map_err(|why| format!("decode failed: {why}"))
 }
