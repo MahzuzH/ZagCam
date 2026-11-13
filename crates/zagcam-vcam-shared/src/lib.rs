@@ -35,6 +35,8 @@ pub const FPS: u32 = 30;
 pub const STALE_AFTER_MS: u64 = 1500;
 
 const MAPPING_NAME: &str = r"Global\ZagCamVirtualCamera";
+/// Production channel name. `Global\` lets the Frame Server service and the engine share it.
+pub const CHANNEL_NAME: &str = MAPPING_NAME;
 const MAGIC: u32 = u32::from_le_bytes(*b"ZGvc");
 const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 64;
@@ -79,6 +81,12 @@ unsafe impl Sync for FrameChannel {}
 impl FrameChannel {
     /// Creates (or opens an existing) channel. Called by the media source in the Frame Server.
     pub fn create() -> windows::core::Result<Self> {
+        Self::create_named(CHANNEL_NAME)
+    }
+
+    /// Creates a channel with a specific name. Tests use `Local\...`, because a normal user
+    /// cannot create a `Global\` section.
+    pub fn create_named(name: &str) -> windows::core::Result<Self> {
         // SYSTEM, LocalService and administrators get full access; interactive users read and write.
         let sddl = w!("D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;GRGW;;;IU)");
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -95,7 +103,7 @@ impl FrameChannel {
                 PAGE_READWRITE,
                 0,
                 MAPPING_BYTES as u32,
-                &HSTRING::from(MAPPING_NAME),
+                &HSTRING::from(name),
             );
             let _ = LocalFree(Some(HLOCAL(descriptor.0)));
             let channel = Self::map(mapping?)?;
@@ -110,8 +118,13 @@ impl FrameChannel {
 
     /// Opens the channel created by a running media source. Called by the engine.
     pub fn open() -> windows::core::Result<Self> {
+        Self::open_named(CHANNEL_NAME)
+    }
+
+    /// Opens a channel with a specific name (tests use a `Local\...` name).
+    pub fn open_named(name: &str) -> windows::core::Result<Self> {
         let mapping = unsafe {
-            OpenFileMappingW((FILE_MAP_READ | FILE_MAP_WRITE).0, false, &HSTRING::from(MAPPING_NAME))?
+            OpenFileMappingW((FILE_MAP_READ | FILE_MAP_WRITE).0, false, &HSTRING::from(name))?
         };
         let channel = Self::map(mapping)?;
         let header = channel.header();
@@ -155,7 +168,18 @@ impl FrameChannel {
     }
 
     /// Copies the latest frame into `out` if it is fresh and exactly `width`×`height`.
+    /// Retries briefly when a write is in flight so a fast producer does not cause a miss.
     pub fn read_frame(&self, width: u32, height: u32, out: &mut [u8]) -> bool {
+        for _ in 0..4 {
+            if self.try_read_frame(width, height, out) {
+                return true;
+            }
+            std::hint::spin_loop();
+        }
+        false
+    }
+
+    fn try_read_frame(&self, width: u32, height: u32, out: &mut [u8]) -> bool {
         let header = self.header();
         let len = nv12_len(width, height);
         if out.len() < len || len > DATA_CAPACITY {
@@ -188,6 +212,26 @@ impl FrameChannel {
         (width > 0 && height > 0 && nv12_len(width, height) <= DATA_CAPACITY).then_some((width, height))
     }
 
+    /// Size of the last frame the engine published, if any.
+    pub fn producer_size(&self) -> Option<(u32, u32)> {
+        let header = self.header();
+        let (width, height) =
+            (header.width.load(Ordering::Relaxed), header.height.load(Ordering::Relaxed));
+        (width > 0 && height > 0).then_some((width, height))
+    }
+
+    /// Milliseconds since the engine last published a frame, if it ever did.
+    pub fn producer_age_ms(&self) -> Option<u64> {
+        self.producer_size()?;
+        let tick = self.header().producer_tick.load(Ordering::Relaxed);
+        (tick > 0).then(|| now_ms().saturating_sub(tick))
+    }
+
+    /// Whether the engine published a frame within [`STALE_AFTER_MS`].
+    pub fn producer_is_fresh(&self) -> bool {
+        self.producer_age_ms().is_some_and(|age| age <= STALE_AFTER_MS)
+    }
+
     /// Publishes a `width`×`height` NV12 frame produced by `fill`.
     pub fn write_frame(&self, width: u32, height: u32, fill: impl FnOnce(&mut [u8])) {
         let len = nv12_len(width, height);
@@ -210,5 +254,92 @@ impl Drop for FrameChannel {
             let _ = UnmapViewOfFile(self.view);
             let _ = CloseHandle(self.mapping);
         }
+    }
+}
+
+#[cfg(test)]
+impl FrameChannel {
+    fn set_producer_tick(&self, tick: u64) {
+        self.header().producer_tick.store(tick, Ordering::Relaxed);
+    }
+
+    fn set_consumer_tick(&self, tick: u64) {
+        self.header().consumer_tick.store(tick, Ordering::Relaxed);
+    }
+
+    fn set_seq(&self, seq: u64) {
+        self.header().seq.store(seq, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameChannel, STALE_AFTER_MS, nv12_len, now_ms};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A `Local\` channel with a unique name, safe to create as a normal user and in parallel tests.
+    fn test_channel() -> FrameChannel {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!(r"Local\ZagCamTest-{}-{}", std::process::id(), n);
+        FrameChannel::create_named(&name).expect("create test channel")
+    }
+
+    fn filled(width: u32, height: u32, value: u8) -> Vec<u8> {
+        vec![value; nv12_len(width, height)]
+    }
+
+    #[test]
+    fn round_trip_returns_the_written_frame() {
+        let channel = test_channel();
+        let sent = filled(640, 480, 200);
+        channel.write_frame(640, 480, |out| out.copy_from_slice(&sent));
+
+        let mut got = filled(640, 480, 0);
+        assert!(channel.read_frame(640, 480, &mut got));
+        assert_eq!(got, sent);
+    }
+
+    #[test]
+    fn torn_write_is_rejected() {
+        let channel = test_channel();
+        channel.write_frame(640, 480, |out| out.fill(10));
+        channel.set_seq(1); // odd: a write is "in progress"
+
+        let mut got = filled(640, 480, 0);
+        assert!(!channel.read_frame(640, 480, &mut got));
+    }
+
+    #[test]
+    fn size_mismatch_is_rejected() {
+        let channel = test_channel();
+        channel.write_frame(640, 480, |out| out.fill(10));
+
+        let mut got = filled(1280, 720, 0);
+        assert!(!channel.read_frame(1280, 720, &mut got));
+    }
+
+    #[test]
+    fn stale_producer_is_rejected() {
+        let channel = test_channel();
+        channel.write_frame(640, 480, |out| out.fill(10));
+        channel.set_producer_tick(now_ms().saturating_sub(STALE_AFTER_MS + 1000));
+
+        let mut got = filled(640, 480, 0);
+        assert!(!channel.read_frame(640, 480, &mut got));
+        assert!(!channel.producer_is_fresh());
+        assert!(channel.producer_age_ms().is_some_and(|age| age > STALE_AFTER_MS));
+    }
+
+    #[test]
+    fn consumer_request_tracks_heartbeat() {
+        let channel = test_channel();
+        assert_eq!(channel.active_request(), None);
+
+        channel.announce_consumer(1280, 720);
+        assert_eq!(channel.active_request(), Some((1280, 720)));
+
+        channel.set_consumer_tick(now_ms().saturating_sub(STALE_AFTER_MS + 1000));
+        assert_eq!(channel.active_request(), None);
     }
 }

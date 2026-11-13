@@ -132,6 +132,7 @@ cargo build -p zagcam-vcam --release
 powershell -ExecutionPolicy Bypass -File .\tools\vcam\install-dev.ps1   # admin, once
 cargo run --release -- vcam status        # registered DLL + whether a source is live
 cargo run --release -- vcam start         # create the camera (Ctrl+C removes it)
+cargo run --release -- vcam watch         # show the shared frame channel state
 cargo run --release -- --list             # virtual cameras are marked "(virtual)"
 ```
 

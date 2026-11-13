@@ -142,6 +142,29 @@ pub fn source_active() -> bool {
     FrameChannel::open().is_ok()
 }
 
+/// Snapshot of the shared frame channel for `vcam watch` / diagnostics.
+pub struct ChannelInfo {
+    /// Resolution a client is reading, if any client read recently.
+    pub requested: Option<(u32, u32)>,
+    /// Size of the last frame the engine published.
+    pub producer: Option<(u32, u32)>,
+    /// Milliseconds since the engine last published.
+    pub producer_age_ms: Option<u64>,
+    /// Whether the engine published within the freshness window.
+    pub producer_fresh: bool,
+}
+
+/// Opens the shared channel and reports its state; `None` if no media source is running.
+pub fn channel_info() -> Option<ChannelInfo> {
+    let channel = FrameChannel::open().ok()?;
+    Some(ChannelInfo {
+        requested: channel.active_request(),
+        producer: channel.producer_size(),
+        producer_age_ms: channel.producer_age_ms(),
+        producer_fresh: channel.producer_is_fresh(),
+    })
+}
+
 /// Registration and runtime status for the `vcam status` command.
 pub struct Status {
     pub registered: Option<PathBuf>,

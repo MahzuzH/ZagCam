@@ -11,6 +11,7 @@ Commands:
   start [--seconds N]  create and start the virtual camera, then wait (default: until Ctrl+C)
   stop                 stop and remove a session camera created by another process
   status               show whether the media source is registered and if a source is live
+  watch [--seconds N]  show the shared frame channel state (client resolution, engine freshness)
   install              register the provider DLL (needs an elevated shell)
   uninstall            unregister the provider DLL (needs an elevated shell)";
 
@@ -23,6 +24,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         "start" => start(&args[1..]),
         "stop" => stop(),
         "status" => status(),
+        "watch" => watch(&args[1..]),
         "install" => register(&args[1..], false),
         "uninstall" => register(&args[1..], true),
         "help" | "--help" | "-h" => {
@@ -68,6 +70,31 @@ fn status() -> Result<(), String> {
     println!("camera name:    {CAMERA_NAME} Windows Virtual Camera");
     println!("media source:   {}", if status.source_active { "live" } else { "not running" });
     Ok(())
+}
+
+fn watch(args: &[String]) -> Result<(), String> {
+    let seconds = parse_seconds(args)?;
+    let start = std::time::Instant::now();
+    loop {
+        match zagcam_vcam_mgr::channel_info() {
+            None => println!("media source: not running (is `zagcam vcam start` running?)"),
+            Some(info) => {
+                let requested =
+                    info.requested.map_or_else(|| "none".to_string(), |(w, h)| format!("{w}x{h}"));
+                let engine = match (info.producer, info.producer_age_ms, info.producer_fresh) {
+                    (Some((w, h)), Some(age), true) => format!("{w}x{h}, fresh ({age} ms)"),
+                    (Some((w, h)), Some(age), false) => format!("{w}x{h}, stale ({age} ms)"),
+                    (Some((w, h)), None, _) => format!("{w}x{h}, never"),
+                    _ => "none".to_string(),
+                };
+                println!("client reading: {requested} | engine frame: {engine}");
+            }
+        }
+        if seconds.is_some_and(|limit| start.elapsed().as_secs_f64() >= limit) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn parse_seconds(args: &[String]) -> Result<Option<f64>, String> {
