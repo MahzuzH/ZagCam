@@ -1,7 +1,10 @@
+mod app;
 mod capture;
+mod engine;
 mod nv12;
 mod pipeline;
 mod segmenter;
+mod settings;
 mod sink;
 mod stats;
 mod vcam;
@@ -14,19 +17,22 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use pipeline::Pipeline;
-use segmenter::Segmenter;
+use settings::Mode;
 use sink::{Sink, WindowSink};
 
 const USAGE: &str = "ZagCam - lightweight virtual camera
 
 Usage:
+  zagcam                     open the tray app (settings window from the tray menu)
   zagcam [options]
 
 Options:
   --camera N        camera number to open (see --list, default 0)
   --list, -l        list available cameras
-  --mode off|blur   effect (default off)
+  --mode off|blur|image
+                    effect (default off)
   --blur 0..100     blur intensity (default 50)
+  --background PATH background image for --mode image
   --sink window|vcam|mfvcam
                     output: preview window, OBS virtual camera, or ZagCam camera (default window)
   --model PATH      ONNX segmentation model
@@ -41,12 +47,6 @@ Keys: Esc quits the preview window.";
 const DEFAULT_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Off,
-    Blur,
-}
-
-#[derive(Clone, Copy, PartialEq)]
 enum SinkKind {
     Window,
     Vcam,
@@ -58,6 +58,7 @@ struct Args {
     camera: Option<usize>,
     mode: Mode,
     blur: u8,
+    background: Option<PathBuf>,
     sink: SinkKind,
     model: PathBuf,
     probe: Option<f64>,
@@ -78,6 +79,9 @@ fn run() -> Result<(), String> {
     if argv.first().map(String::as_str) == Some("vcam") {
         argv.remove(0);
         return vcam::run(&argv);
+    }
+    if argv.is_empty() {
+        return app::run(PathBuf::from(DEFAULT_MODEL));
     }
     let args = parse_args(argv)?;
     if args.list {
@@ -128,13 +132,14 @@ fn run() -> Result<(), String> {
 
     let mut rgb = vec![0u8; sw * sh * 3];
 
-    let mut pipeline = match args.mode {
-        Mode::Off => None,
-        Mode::Blur => {
-            let segmenter = Segmenter::load(&args.model)?;
-            Some(Pipeline::new(segmenter, sw, sh, args.blur)?)
-        }
-    };
+    let mut pipeline = Pipeline::build(
+        args.mode,
+        &args.model,
+        sw,
+        sh,
+        args.blur,
+        args.background.as_deref(),
+    )?;
 
     if let Some(secs) = args.probe {
         return probe(&mut camera, &mut rgb, secs, pipeline.as_mut());
@@ -150,6 +155,7 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         camera: None,
         mode: Mode::Off,
         blur: 50,
+        background: None,
         sink: SinkKind::Window,
         model: PathBuf::from(DEFAULT_MODEL),
         probe: None,
@@ -167,17 +173,16 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
                 );
             }
             "--mode" => {
-                args.mode = match value()?.as_str() {
-                    "off" => Mode::Off,
-                    "blur" => Mode::Blur,
-                    other => return Err(format!("unknown mode {other}")),
-                };
+                let raw = value()?;
+                args.mode = Mode::parse(&raw)
+                    .ok_or_else(|| format!("unknown mode {raw}"))?;
             }
             "--blur" => {
                 args.blur = value()?
                     .parse()
                     .map_err(|_| "bad blur intensity".to_string())?;
             }
+            "--background" => args.background = Some(PathBuf::from(value()?)),
             "--sink" => {
                 args.sink = match value()?.as_str() {
                     "window" => SinkKind::Window,
@@ -242,13 +247,14 @@ impl CaptureSession {
         let camera = capture::open(index)?;
         let format = camera.camera_format();
         let (width, height) = (format.width() as usize, format.height() as usize);
-        let pipeline = match args.mode {
-            Mode::Off => None,
-            Mode::Blur => {
-                let segmenter = Segmenter::load(&args.model)?;
-                Some(Pipeline::new(segmenter, width, height, args.blur)?)
-            }
-        };
+        let pipeline = Pipeline::build(
+            args.mode,
+            &args.model,
+            width,
+            height,
+            args.blur,
+            args.background.as_deref(),
+        )?;
         println!("camera opened: {width}x{height}");
         Ok(Self {
             camera,
