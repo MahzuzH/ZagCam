@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M1 done, M2 in progress.** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
+**Status: M2 code done (manual gates pending); M3 sprints 7–8 code done (manual gates pending), sprint 9 next.** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
 
 ## Why
 
@@ -88,15 +88,15 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 - **Compositing:** CPU with SIMD (`fast_image_resize`) and `rayon`; `wgpu` as an optional GPU path
 - **GIF decoding:** `gif` / `image`, frames kept at native GIF resolution
 - **Windows API:** `windows` crate, `MFCreateVirtualCamera`
-- **UI:** tray app with `egui` or `iced`
-- **Build:** `opt-level = "s"`, LTO, `codegen-units = 1`, `panic = "abort"`, `strip = true`
+- **UI:** tray app with `eframe`/`egui`, tray menu with `tray-icon`
+- **Build:** `opt-level = "s"`, LTO, `codegen-units = 1`, `strip = true`
 
 ## Roadmap
 
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: engine integration done; compatibility and soak gates remain)*
-4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand.
+4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(sprints 7–8 code done, manual gates pending; sprint 9 next)*
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
 7. **M6** — Linux, then **M7** — macOS.

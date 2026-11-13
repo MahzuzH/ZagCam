@@ -46,6 +46,7 @@ struct App {
     last_effect: Mode,
     devices: Vec<String>,
     device_index: usize,
+    saved_device_index: usize,
     window_visible: bool,
     allow_exit: bool,
     message: Option<String>,
@@ -74,6 +75,7 @@ impl App {
             last_effect,
             devices: cameras.iter().map(|camera| camera.human_name()).collect(),
             device_index,
+            saved_device_index: device_index,
             window_visible,
             allow_exit: false,
             message: None,
@@ -88,20 +90,25 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
-    fn commit(&mut self, settings: Settings) {
-        match settings.save() {
+    fn commit(&mut self, settings: Settings) -> bool {
+        let saved = match settings.save() {
             Ok(()) => {
                 self.current = settings.clone();
                 self.draft = settings.clone();
                 self.engine.send(settings);
                 self.error = None;
                 self.message = Some("Saved".to_string());
+                true
             }
-            Err(why) => self.error = Some(format!("cannot save settings: {why}")),
-        }
+            Err(why) => {
+                self.error = Some(format!("cannot save settings: {why}"));
+                false
+            }
+        };
         if let Some(tray) = &self.tray {
             tray.sync(&self.current);
         }
+        saved
     }
 
     fn set_mode(&mut self, ctx: &egui::Context, mode: Mode) {
@@ -153,7 +160,9 @@ impl App {
                 }
             }
         }
-        self.commit(next);
+        if self.commit(next) {
+            self.saved_device_index = self.device_index;
+        }
     }
 
     fn handle_tray(&mut self, ctx: &egui::Context) {
@@ -189,7 +198,9 @@ impl App {
                 ui,
                 |ui| {
                     for (index, name) in self.devices.iter().enumerate() {
-                        ui.selectable_value(&mut self.device_index, index, name);
+                        if ui.selectable_value(&mut self.device_index, index, name).clicked() {
+                            self.message = None;
+                        }
                     }
                 },
             );
@@ -197,15 +208,20 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.label("Mode");
-            ui.selectable_value(&mut self.draft.mode, Mode::Off, "Off");
-            ui.selectable_value(&mut self.draft.mode, Mode::Blur, "Blur");
-            ui.selectable_value(&mut self.draft.mode, Mode::Image, "Image");
+            for (mode, label) in [(Mode::Off, "Off"), (Mode::Blur, "Blur"), (Mode::Image, "Image")] {
+                if ui.selectable_value(&mut self.draft.mode, mode, label).clicked() {
+                    self.message = None;
+                }
+            }
         });
 
-        ui.add_enabled(
+        let blur = ui.add_enabled(
             self.draft.mode == Mode::Blur,
             egui::Slider::new(&mut self.draft.blur, 0..=100).text("Blur intensity"),
         );
+        if blur.changed() {
+            self.message = None;
+        }
 
         ui.horizontal(|ui| {
             let background = self
@@ -222,6 +238,7 @@ impl App {
                 .pick_file()
         {
             self.draft.background = Some(path);
+            self.message = None;
         }
 
         ui.separator();
@@ -238,7 +255,9 @@ impl App {
             }
             if ui.button("Cancel").clicked() {
                 self.draft = self.current.clone();
+                self.device_index = self.saved_device_index;
                 self.error = None;
+                self.message = None;
             }
             if ui.button("Quit").clicked() {
                 self.allow_exit = true;

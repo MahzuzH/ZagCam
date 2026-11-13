@@ -95,6 +95,7 @@ fn worker(
     let mut session: Option<Session> = None;
     let mut sink = MfvcamSink::new();
     let mut last_capture_error: Option<Instant> = None;
+    let mut last_apply_error: Option<Instant> = None;
 
     loop {
         let mut quit = false;
@@ -103,6 +104,7 @@ fn worker(
                 Ok(Control::Settings(settings)) => {
                     desired = settings;
                     applied = None;
+                    last_apply_error = None;
                 }
                 Ok(Control::Quit) | Err(TryRecvError::Disconnected) => {
                     quit = true;
@@ -138,11 +140,12 @@ fn worker(
         }
 
         if session.is_none() {
-            match Session::open(&desired, &model) {
+            match open_session(&desired, &model, &error) {
                 Ok(opened) => {
                     session = Some(opened);
                     applied = None;
                     last_capture_error = None;
+                    last_apply_error = None;
                 }
                 Err(why) => {
                     if last_capture_error.is_none_or(|at| at.elapsed() >= CAPTURE_RETRY) {
@@ -156,11 +159,20 @@ fn worker(
         }
 
         if let Some(current) = session.as_mut() {
-            if applied.as_ref() != Some(&desired) {
-                if let Err(why) = current.apply(&desired) {
-                    report(&error, format!("cannot apply settings: {why}"));
+            if applied.as_ref() != Some(&desired)
+                && last_apply_error.is_none_or(|at| at.elapsed() >= CAPTURE_RETRY)
+            {
+                match current.apply(&desired) {
+                    Ok(()) => {
+                        applied = Some(desired.clone());
+                        last_apply_error = None;
+                        clear(&error);
+                    }
+                    Err(why) => {
+                        report(&error, format!("cannot apply settings: {why}"));
+                        last_apply_error = Some(Instant::now());
+                    }
                 }
-                applied = Some(desired.clone());
             }
             if let Err(why) = current.publish(&mut sink) {
                 report(&error, format!("capture stopped: {why}; reopening"));
@@ -177,6 +189,37 @@ fn report(error: &Arc<Mutex<String>>, message: String) {
     if let Ok(mut slot) = error.lock() {
         *slot = message;
     }
+}
+
+fn clear(error: &Arc<Mutex<String>>) {
+    if let Ok(mut slot) = error.lock() {
+        slot.clear();
+    }
+}
+
+/// Opens the camera; a bad image background degrades to no effect instead of blocking capture.
+fn open_session(
+    settings: &Settings,
+    model: &Path,
+    error: &Arc<Mutex<String>>,
+) -> Result<Session, String> {
+    match Session::open(settings, model) {
+        Err(why) => match fallback_settings(settings) {
+            Some(fallback) => {
+                report(error, format!("cannot use background: {why}; effect off"));
+                Session::open(&fallback, model)
+            }
+            None => Err(why),
+        },
+        result => result,
+    }
+}
+
+fn fallback_settings(settings: &Settings) -> Option<Settings> {
+    (settings.mode == Mode::Image).then(|| Settings {
+        mode: Mode::Off,
+        ..settings.clone()
+    })
 }
 
 fn camera_key(settings: &Settings) -> (Option<String>, usize) {
@@ -282,5 +325,26 @@ impl Session {
         output.present(present, self.width, self.height)?;
         self.last_active = Instant::now();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fallback_settings;
+    use crate::settings::{Mode, Settings};
+
+    #[test]
+    fn only_image_mode_falls_back_to_off() {
+        let image = Settings {
+            mode: Mode::Image,
+            ..Settings::default()
+        };
+        assert_eq!(fallback_settings(&image).map(|settings| settings.mode), Some(Mode::Off));
+        assert!(fallback_settings(&Settings::default()).is_none());
+        let blur = Settings {
+            mode: Mode::Blur,
+            ..Settings::default()
+        };
+        assert!(fallback_settings(&blur).is_none());
     }
 }

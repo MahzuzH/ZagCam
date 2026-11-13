@@ -136,8 +136,8 @@ impl Settings {
 
         if let Some(value) = map.get("version") {
             match value.as_u64() {
-                Some(version) => settings.version = version as u32,
-                None => problem = true,
+                Some(version) if version == u64::from(VERSION) => settings.version = VERSION,
+                _ => problem = true,
             }
         }
         if let Some(value) = map.get("camera_name") {
@@ -163,7 +163,7 @@ impl Settings {
         }
         if let Some(value) = map.get("blur") {
             match value.as_u64() {
-                Some(blur) if blur <= u8::MAX as u64 => settings.blur = blur as u8,
+                Some(blur) if blur <= 100 => settings.blur = blur as u8,
                 _ => problem = true,
             }
         }
@@ -260,6 +260,15 @@ mod tests {
     fn corrupt_json_falls_back_to_defaults() {
         let parsed = Settings::parse("{not json");
         assert_eq!(parsed.settings, Settings::default());
+        assert!(parsed.problem.is_some());
+    }
+
+    #[test]
+    fn out_of_range_blur_and_unknown_version_use_defaults() {
+        let parsed = Settings::parse(r#"{"version":2,"blur":101,"mode":"blur"}"#);
+        assert_eq!(parsed.settings.version, 1);
+        assert_eq!(parsed.settings.blur, 50);
+        assert_eq!(parsed.settings.mode, Mode::Blur);
         assert!(parsed.problem.is_some());
     }
 

@@ -103,7 +103,9 @@ Gate:
 Risks:
 
 - UI dependency size: measure the release binary; if `eframe` blows the installer budget,
-  replace it with a native Win32 window before adding more UI.
+  replace it with a native Win32 window before adding more UI. Measured 2026-11-14:
+  `ZagCam.exe` 33.1 MiB, release binaries + `DirectML.dll` 51.0 MiB uncompressed; installer
+  compression still untested.
 - UI and engine on one thread would freeze; keep capture/inference on the engine thread.
 
 ### Sprint 9 — app lifecycle and on-demand camera
