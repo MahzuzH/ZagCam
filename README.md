@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M1 done, M2 in progress.** Capture, background blur, and an own Media Foundation virtual camera that currently streams a test pattern (see [Build and usage](#build-and-usage)). Wiring the engine's blurred frames into that camera is next.
+**Status: M1 done, M2 in progress.** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
 
 ## Why
 
@@ -95,7 +95,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
-3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: provider + registration + test pattern done)*
+3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: engine integration done; compatibility and soak gates remain)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand.
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
@@ -111,7 +111,8 @@ cargo run --release --                         # preview the first camera, no ef
 cargo run --release -- --mode blur             # preview with background blur
 cargo run --release -- --mode blur --blur 80   # stronger blur (0..100)
 cargo run --release -- --probe 5 --mode blur   # headless, print fps / RAM / CPU and per-stage ms
-cargo run --release -- --sink vcam --features sink-vcam   # feed the virtual camera
+cargo run --release -- --sink mfvcam --mode blur   # feed ZagCam's own camera
+cargo run --release -- --sink vcam --features sink-vcam   # feed the OBS virtual camera
 ```
 
 Prefer `--release`: debug builds are an order of magnitude slower.
@@ -124,25 +125,27 @@ needed. It expects a 256x144 RGB input scaled to 0..1 and outputs a person mask;
 
 ### Own virtual camera (M2, in progress)
 
-ZagCam has its own Media Foundation virtual camera (no OBS needed). Register the provider DLL
-once, then start the camera:
+ZagCam has its own Media Foundation virtual camera (no OBS needed). Install the provider once,
+then start the camera and feed it from the engine:
 
 ```sh
 cargo build -p zagcam-vcam --release
-powershell -ExecutionPolicy Bypass -File .\tools\vcam\install-dev.ps1   # admin, once
+cargo run --release -- vcam install       # UAC once; copies to %ProgramFiles%\ZagCam\VirtualCamera
 cargo run --release -- vcam status        # registered DLL + whether a source is live
 cargo run --release -- vcam start         # create the camera (Ctrl+C removes it)
+cargo run --release -- --sink mfvcam --mode blur   # second terminal: publish blurred frames
 cargo run --release -- vcam watch         # show the shared frame channel state
-cargo run --release -- vcam feed          # publish test frames (dev check the camera serves them)
 cargo run --release -- --list             # virtual cameras are marked "(virtual)"
+cargo run --release -- vcam uninstall     # UAC once; removes the CLSID and installed copy
 ```
 
-For now the provider shows a built-in test pattern; the engine starts feeding it in a later
-step. The camera is session-scoped, so it disappears when the process exits. `vcam stop`
-removes a session camera created by another process.
+The camera is session-scoped, so it disappears when `vcam start` exits. The engine opens the
+physical webcam only while an app is reading the virtual camera, and releases it after the
+client stops. Without an engine, the provider shows its built-in test pattern.
 
 `cargo run --release -- --camera N --probe 5` can read the virtual camera back as an input,
-which is a quick end-to-end check.
+which is a quick end-to-end check. `zagcam vcam feed` still publishes test frames for
+provider-only checks. Provider diagnostics go to `%ProgramData%\ZagCam\vcam-<account>.log`.
 
 ### OBS virtual camera (fallback)
 

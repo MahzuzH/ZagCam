@@ -8,15 +8,19 @@
 
 use std::path::PathBuf;
 
-use zagcam_vcam_shared::{CLSID_STRING, FRIENDLY_NAME};
-use windows::core::PCWSTR;
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::Media::MediaFoundation::{
-    IMFVirtualCamera, MF_VERSION, MFCreateVirtualCamera, MFStartup, MFVirtualCameraAccess_CurrentUser,
-    MFVirtualCameraLifetime_Session, MFVirtualCameraType_SoftwareCameraSource, MFShutdown,
+    IMFVirtualCamera, MF_VERSION, MFCreateVirtualCamera, MFShutdown, MFStartup,
+    MFVirtualCameraAccess_CurrentUser, MFVirtualCameraLifetime_Session,
+    MFVirtualCameraType_SoftwareCameraSource,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+use windows::Win32::System::Registry::{
+    HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegDeleteTreeW, RegGetValueW,
+};
 use windows::core::HSTRING;
+use windows::core::PCWSTR;
+use zagcam_vcam_shared::{CLSID_STRING, FRIENDLY_NAME};
 
 /// Keeps COM initialised for the lifetime of the value.
 struct ComGuard;
@@ -83,13 +87,19 @@ impl VirtualCamera {
         let com = ComGuard::init()?;
         let mf = MfGuard::init()?;
         let camera = create()?;
-        unsafe { camera.Start(None) }.map_err(|why| format!("starting the virtual camera failed: {why}"))?;
-        Ok(Self { camera, _mf: mf, _com: com })
+        unsafe { camera.Start(None) }
+            .map_err(|why| format!("starting the virtual camera failed: {why}"))?;
+        Ok(Self {
+            camera,
+            _mf: mf,
+            _com: com,
+        })
     }
 
     /// Stops the stream; the camera stays registered until dropped or removed.
     pub fn stop(&self) -> Result<(), String> {
-        unsafe { self.camera.Stop() }.map_err(|why| format!("stopping the virtual camera failed: {why}"))
+        unsafe { self.camera.Stop() }
+            .map_err(|why| format!("stopping the virtual camera failed: {why}"))
     }
 }
 
@@ -107,7 +117,8 @@ pub fn remove() -> Result<(), String> {
     let com = ComGuard::init()?;
     let mf = MfGuard::init()?;
     let camera = create()?;
-    unsafe { camera.Remove() }.map_err(|why| format!("removing the virtual camera failed: {why}"))?;
+    unsafe { camera.Remove() }
+        .map_err(|why| format!("removing the virtual camera failed: {why}"))?;
     drop(camera);
     drop(mf);
     drop(com);
@@ -116,7 +127,9 @@ pub fn remove() -> Result<(), String> {
 
 /// The DLL path COM has registered for our CLSID, if any.
 pub fn registered_dll() -> Option<PathBuf> {
-    let subkey = HSTRING::from(format!(r"Software\Classes\CLSID\{CLSID_STRING}\InprocServer32"));
+    let subkey = HSTRING::from(format!(
+        r"Software\Classes\CLSID\{CLSID_STRING}\InprocServer32"
+    ));
     let mut buffer = [0u16; 1024];
     let mut bytes = (buffer.len() * 2) as u32;
     let status = unsafe {
@@ -135,6 +148,20 @@ pub fn registered_dll() -> Option<PathBuf> {
     }
     let len = (bytes as usize / 2).saturating_sub(1);
     Some(PathBuf::from(String::from_utf16_lossy(&buffer[..len])))
+}
+
+/// Removes the CLSID registration directly, even when the registered DLL is already gone.
+pub fn unregister_clsid() -> Result<(), String> {
+    let subkey = HSTRING::from(format!(r"Software\Classes\CLSID\{CLSID_STRING}"));
+    let status = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, &subkey) };
+    if status == WIN32_ERROR(0) || status == WIN32_ERROR(2) {
+        Ok(())
+    } else {
+        Err(format!(
+            "removing the CLSID registration failed: {}",
+            status.0
+        ))
+    }
 }
 
 /// Whether a media source is currently publishing the shared frame channel.
@@ -172,8 +199,11 @@ pub struct Status {
 }
 
 pub fn status() -> Status {
-    Status { registered: registered_dll(), source_active: source_active() }
+    Status {
+        registered: registered_dll(),
+        source_active: source_active(),
+    }
 }
 
 pub use zagcam_vcam_shared::FRIENDLY_NAME as CAMERA_NAME;
-pub use zagcam_vcam_shared::FrameChannel;
+pub use zagcam_vcam_shared::{FrameChannel, nv12_len};

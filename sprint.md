@@ -21,8 +21,8 @@ Conventions for every sprint:
 | 2 — camera lifecycle | done | `MFCreateVirtualCamera` wrapper + `zagcam vcam start/stop/status/install/uninstall`; camera enumerates and streams |
 | 3 — frame transport | done | seq-lock channel tests + `vcam watch`; user-space `open()` of the `Global\` section proven |
 | 4 — provider reads the channel | done | real frames from an external producer reach the camera; live/pattern transitions verified |
-| 5 — engine integration | next | blurred webcam feed into the camera; open camera only while consumed |
-| 6 — hardening and uninstall | todo | compatibility matrix, soak, clean uninstall |
+| 5 — engine integration | code done | blurred webcam feed into the camera; open camera only while consumed |
+| 6 — hardening and uninstall | code done | compatibility matrix, soak, clean uninstall |
 
 ### Sprint 4 — provider serves real frames (done)
 
@@ -43,18 +43,19 @@ Implemented notes:
 
 ### Sprint 5 — engine integration (blurred frames into the camera)
 
-Work:
+Implemented:
 
-1. New sink `MfvcamSink` in `src/sink.rs` (or `src/vcam_sink.rs`): convert the pipeline's RGB
-   output to NV12 and `write_frame` to the channel.
-2. Publish only when `active_request()` returns a size (`FrameChannel::open` / mgr `channel_info`);
-   otherwise idle. This is FR-7: open the physical webcam only while the camera is consumed.
-3. Add `--sink mfvcam`; keep `window` and the OBS `vcam` fallback.
-4. RGB -> NV12 conversion in the engine (reuse a function shared with the provider side if useful).
-5. Reconnect logic: if the channel is absent, keep retrying without spinning; if the provider
-   goes away, do not crash.
+1. `MfvcamSink` in `src/sink.rs` converts the pipeline's RGB output to NV12 and `write_frame`s
+   it to the channel; the client's requested size is handled with a reusable resizer.
+2. Publishing is demand-driven: `active_request()` gates capture and writes. The engine does not
+   open the physical webcam until a client reads, and releases it after 3 s of no demand (FR-7).
+3. `--sink mfvcam` is available; `window` and the OBS `vcam` fallback are unchanged.
+4. RGB -> NV12 conversion lives in `src/nv12.rs` with BT.709 limited-range coefficients matching
+   the provider media type, plus unit tests.
+5. The channel is opened with a 1 s retry throttle; a missing provider or a stopped client leaves
+   the engine idle without spinning or crashing.
 
-Gate:
+Manual gate (not yet run):
 
 - Chrome/Discord/Teams pick "ZagCam Camera (Windows Virtual Camera)" and show the blurred feed.
 - `zagcam vcam watch` reports `engine frame: 1280x720, fresh (...)` while a client reads.
@@ -68,21 +69,23 @@ Risks:
 
 ### Sprint 6 — hardening and uninstall
 
-Work:
+Implemented:
 
-1. `zagcam vcam install/uninstall` self-elevation (one UAC prompt), matching
-   `tools/vcam/install-dev.ps1`; installed DLL path must be stable across updates (content-hashed
-   copy under `%ProgramFiles%\ZagCam\VirtualCamera`, like the CamLights reference).
-2. Clean uninstall: unregister the CLSID, remove the session/system camera, remove installed
-   copies not in use, leave user config.
-3. Compatibility matrix per PRD §12: Meet (Chrome/Edge/Firefox), Teams (desktop/web), Discord
-   (desktop/web), Zoom, OBS; multiple apps at once; app opened before ZagCam; webcam unplugged
-   mid-meeting (placeholder frame).
-4. Stability: 30–60 min soak, no leak; Frame Server restart recovery.
-5. Decide whether `--sink vcam` (OBS/UnityCapture fallback) stays or is dropped.
-6. Update README with the final camera usage and admin/install story.
+1. `zagcam vcam install/uninstall` self-elevate with one UAC prompt via `ShellExecuteExW`.
+   The provider DLL is copied to a SHA-256 path under
+   `%ProgramFiles%\ZagCam\VirtualCamera\<hash>\zagcam_vcam.dll` and registered from there.
+2. Uninstall removes the session camera (best effort), unregisters the installed DLL or deletes
+   the CLSID key directly, and removes the Program Files copy. It is idempotent.
+3. `tools/vcam/install-dev.ps1` now builds and calls the same `vcam install/uninstall` path.
+4. README documents the install/start/feed/uninstall flow.
 
-Gate:
+Manual gate (not yet run):
+
+- Compatibility matrix per PRD §12: Meet (Chrome/Edge/Firefox), Teams (desktop/web), Discord
+  (desktop/web), Zoom, OBS; multiple apps at once; app opened before ZagCam; webcam unplugged
+  mid-meeting (placeholder frame).
+- Stability: 30–60 min soak, no leak; Frame Server restart recovery.
+- Decide whether `--sink vcam` (OBS/UnityCapture fallback) stays or is dropped.
 
 - Matrix entries pass; uninstall leaves no CLSID and no camera; soak shows flat memory.
 

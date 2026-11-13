@@ -1,12 +1,14 @@
 mod capture;
+mod nv12;
 mod pipeline;
 mod segmenter;
 mod sink;
 mod stats;
 mod vcam;
 
-use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::CameraIndex;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -25,7 +27,8 @@ Options:
   --list, -l        list available cameras
   --mode off|blur   effect (default off)
   --blur 0..100     blur intensity (default 50)
-  --sink window|vcam  output: preview window or virtual camera (default window)
+  --sink window|vcam|mfvcam
+                    output: preview window, OBS virtual camera, or ZagCam camera (default window)
   --model PATH      ONNX segmentation model
   --probe S         run S seconds headless, print fps / RAM / CPU
   --help, -h        show this help
@@ -47,6 +50,7 @@ enum Mode {
 enum SinkKind {
     Window,
     Vcam,
+    Mfvcam,
 }
 
 struct Args {
@@ -80,25 +84,47 @@ fn run() -> Result<(), String> {
         let cameras = capture::list()?;
         for (i, cam) in cameras.iter().enumerate() {
             let name = cam.human_name();
-            let kind = if name.to_ascii_lowercase().contains("virtual camera") { " (virtual)" } else { "" };
-            println!("{i}: {name} [{}]{kind}", cam.index().as_index().unwrap_or(0));
+            let kind = if name.to_ascii_lowercase().contains("virtual camera") {
+                " (virtual)"
+            } else {
+                ""
+            };
+            println!(
+                "{i}: {name} [{}]{kind}",
+                cam.index().as_index().unwrap_or(0)
+            );
         }
         return Ok(());
     }
 
     let cameras = capture::list()?;
     if cameras.is_empty() {
+        if args.sink == SinkKind::Mfvcam && args.probe.is_none() {
+            return run_mfvcam(&args, CameraIndex::Index(args.camera.unwrap_or(0) as u32));
+        }
         return Err("no camera found".into());
     }
     let source = match args.camera {
-        Some(i) => cameras.get(i).ok_or_else(|| format!("camera {i} not found"))?,
+        Some(i) => cameras
+            .get(i)
+            .ok_or_else(|| format!("camera {i} not found"))?,
         None => &cameras[0],
     };
+
+    if args.sink == SinkKind::Mfvcam && args.probe.is_none() {
+        return run_mfvcam(&args, source.index().clone());
+    }
 
     let mut camera = capture::open(source.index())?;
     let format = camera.camera_format();
     let (sw, sh) = (format.width() as usize, format.height() as usize);
-    println!("source: {} | {}x{} {}", source.human_name(), sw, sh, format.format());
+    println!(
+        "source: {} | {}x{} {}",
+        source.human_name(),
+        sw,
+        sh,
+        format.format()
+    );
 
     let mut rgb = vec![0u8; sw * sh * 3];
 
@@ -134,7 +160,11 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         match arg.as_str() {
             "--list" | "-l" => args.list = true,
             "--camera" | "-c" => {
-                args.camera = Some(value()?.parse().map_err(|_| "bad camera index".to_string())?);
+                args.camera = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "bad camera index".to_string())?,
+                );
             }
             "--mode" => {
                 args.mode = match value()?.as_str() {
@@ -144,18 +174,25 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
                 };
             }
             "--blur" => {
-                args.blur = value()?.parse().map_err(|_| "bad blur intensity".to_string())?;
+                args.blur = value()?
+                    .parse()
+                    .map_err(|_| "bad blur intensity".to_string())?;
             }
             "--sink" => {
                 args.sink = match value()?.as_str() {
                     "window" => SinkKind::Window,
                     "vcam" => SinkKind::Vcam,
+                    "mfvcam" => SinkKind::Mfvcam,
                     other => return Err(format!("unknown sink {other}")),
                 };
             }
             "--model" => args.model = PathBuf::from(value()?),
             "--probe" => {
-                args.probe = Some(value()?.parse().map_err(|_| "bad probe duration".to_string())?);
+                args.probe = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "bad probe duration".to_string())?,
+                );
             }
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -178,8 +215,103 @@ fn make_sink(kind: SinkKind, w: usize, h: usize) -> Result<Box<dyn Sink>, String
             #[cfg(not(feature = "sink-vcam"))]
             {
                 let _ = (w, h);
-                Err("this build has no virtual-camera output; rebuild with --features sink-vcam".into())
+                Err("this build has no OBS virtual-camera output; rebuild with --features sink-vcam".into())
             }
+        }
+        SinkKind::Mfvcam => {
+            let _ = (w, h);
+            Ok(Box::new(sink::MfvcamSink::new()))
+        }
+    }
+}
+
+const IDLE_RELEASE: Duration = Duration::from_secs(3);
+const CAPTURE_RETRY: Duration = Duration::from_secs(1);
+
+struct CaptureSession {
+    camera: Camera,
+    rgb: Vec<u8>,
+    pipeline: Option<Pipeline>,
+    width: usize,
+    height: usize,
+    last_active: Instant,
+}
+
+impl CaptureSession {
+    fn open(index: &CameraIndex, args: &Args) -> Result<Self, String> {
+        let camera = capture::open(index)?;
+        let format = camera.camera_format();
+        let (width, height) = (format.width() as usize, format.height() as usize);
+        let pipeline = match args.mode {
+            Mode::Off => None,
+            Mode::Blur => {
+                let segmenter = Segmenter::load(&args.model)?;
+                Some(Pipeline::new(segmenter, width, height, args.blur)?)
+            }
+        };
+        println!("camera opened: {width}x{height}");
+        Ok(Self {
+            camera,
+            rgb: vec![0u8; width * height * 3],
+            pipeline,
+            width,
+            height,
+            last_active: Instant::now(),
+        })
+    }
+
+    fn publish(&mut self, output: &mut dyn Sink) -> Result<(), String> {
+        next_frame(&mut self.camera, &mut self.rgb)?;
+        let present: &[u8] = match self.pipeline.as_mut() {
+            Some(pipeline) => pipeline.process(&self.rgb)?,
+            None => &self.rgb,
+        };
+        output.present(present, self.width, self.height)?;
+        self.last_active = Instant::now();
+        Ok(())
+    }
+}
+
+fn run_mfvcam(args: &Args, index: CameraIndex) -> Result<(), String> {
+    let mut output = sink::MfvcamSink::new();
+    let mut session: Option<CaptureSession> = None;
+    let mut last_error: Option<Instant> = None;
+    println!("waiting for an app to read the ZagCam camera (run `zagcam vcam start` first)");
+
+    loop {
+        if output.wants_frame() {
+            if session.is_none() {
+                match CaptureSession::open(&index, args) {
+                    Ok(opened) => {
+                        session = Some(opened);
+                        last_error = None;
+                    }
+                    Err(why) => {
+                        if last_error.is_none_or(|at| at.elapsed() >= CAPTURE_RETRY) {
+                            eprintln!("capture unavailable: {why}; retrying");
+                            last_error = Some(Instant::now());
+                        }
+                    }
+                }
+            }
+            if let Some(current) = session.as_mut() {
+                if let Err(why) = current.publish(&mut output) {
+                    eprintln!("capture stopped: {why}; reopening");
+                    session = None;
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        } else {
+            if session
+                .as_ref()
+                .is_some_and(|current| current.last_active.elapsed() >= IDLE_RELEASE)
+            {
+                println!("no client reading; releasing camera");
+                session = None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -268,7 +400,9 @@ fn probe(
 }
 
 fn next_frame(camera: &mut Camera, rgb: &mut [u8]) -> Result<(), String> {
-    let frame = camera.frame().map_err(|why| format!("capture failed: {why}"))?;
+    let frame = camera
+        .frame()
+        .map_err(|why| format!("capture failed: {why}"))?;
     frame
         .decode_image_to_buffer::<RgbFormat>(rgb)
         .map_err(|why| format!("decode failed: {why}"))

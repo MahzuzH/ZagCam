@@ -17,14 +17,20 @@ nokhwa = { version = "0.10", default-features = false, features = ["input-msmf",
 ort = "2.0.0-rc.15"
 fast_image_resize = { version = "6", features = ["rayon"] }
 rayon = "1"
+sha2 = "0.10"
 virtualcam = { version = "0.1.1", optional = true, default-features = false, features = ["obs"] }
 zagcam-vcam-mgr = { path = "crates/zagcam-vcam-mgr" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
     "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

@@ -1,9 +1,11 @@
 //! `zagcam vcam ...` — install and drive the virtual camera media source.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use zagcam_vcam_mgr::{CAMERA_NAME, FrameChannel, VirtualCamera};
 
 const USAGE: &str = "Usage: zagcam vcam <command>
@@ -14,8 +16,8 @@ Commands:
   status               show whether the media source is registered and if a source is live
   watch [--seconds N]  show the shared frame channel state (client resolution, engine freshness)
   feed [--seconds N]   publish test frames into the channel (dev check that the camera serves them)
-  install              register the provider DLL (needs an elevated shell)
-  uninstall            unregister the provider DLL (needs an elevated shell)";
+  install              copy and register the provider DLL (asks for elevation once)
+  uninstall            unregister and remove the provider DLL (asks for elevation once)";
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let Some(command) = args.first().map(String::as_str) else {
@@ -71,7 +73,14 @@ fn status() -> Result<(), String> {
         None => println!("registered DLL: none (run `zagcam vcam install`)"),
     }
     println!("camera name:    {CAMERA_NAME} Windows Virtual Camera");
-    println!("media source:   {}", if status.source_active { "live" } else { "not running" });
+    println!(
+        "media source:   {}",
+        if status.source_active {
+            "live"
+        } else {
+            "not running"
+        }
+    );
     Ok(())
 }
 
@@ -82,8 +91,9 @@ fn watch(args: &[String]) -> Result<(), String> {
         match zagcam_vcam_mgr::channel_info() {
             None => println!("media source: not running (is `zagcam vcam start` running?)"),
             Some(info) => {
-                let requested =
-                    info.requested.map_or_else(|| "none".to_string(), |(w, h)| format!("{w}x{h}"));
+                let requested = info
+                    .requested
+                    .map_or_else(|| "none".to_string(), |(w, h)| format!("{w}x{h}"));
                 let engine = match (info.producer, info.producer_age_ms, info.producer_fresh) {
                     (Some((w, h)), Some(age), true) => format!("{w}x{h}, fresh ({age} ms)"),
                     (Some((w, h)), Some(age), false) => format!("{w}x{h}, stale ({age} ms)"),
@@ -102,7 +112,9 @@ fn watch(args: &[String]) -> Result<(), String> {
 
 fn feed(args: &[String]) -> Result<(), String> {
     let seconds = parse_seconds(args)?;
-    println!("waiting for the virtual camera channel (run `zagcam vcam start` and open the camera)...");
+    println!(
+        "waiting for the virtual camera channel (run `zagcam vcam start` and open the camera)..."
+    );
     let channel = open_channel_with_retry()?;
     println!("channel open; publishing test frames while a client reads");
 
@@ -148,7 +160,9 @@ fn open_channel_with_retry() -> Result<FrameChannel, String> {
 }
 
 fn producer_now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Distinct NV12 pattern for the dev feed: moving color bars plus a travelling bright block, so a
@@ -210,7 +224,10 @@ fn parse_seconds(args: &[String]) -> Result<Option<f64>, String> {
         match arg.as_str() {
             "--seconds" | "-s" => {
                 let raw = iter.next().ok_or("--seconds needs a value")?;
-                seconds = Some(raw.parse::<f64>().map_err(|_| format!("bad seconds value {raw}"))?);
+                seconds = Some(
+                    raw.parse::<f64>()
+                        .map_err(|_| format!("bad seconds value {raw}"))?,
+                );
             }
             other => return Err(format!("unknown argument {other}")),
         }
@@ -219,7 +236,8 @@ fn parse_seconds(args: &[String]) -> Result<Option<f64>, String> {
 }
 
 fn provider_dll() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|why| format!("cannot find this executable: {why}"))?;
+    let exe =
+        std::env::current_exe().map_err(|why| format!("cannot find this executable: {why}"))?;
     let dll = exe.with_file_name("zagcam_vcam.dll");
     if dll.exists() {
         return Ok(dll);
@@ -232,27 +250,242 @@ fn provider_dll() -> Result<PathBuf, String> {
 
 fn register(args: &[String], unregister: bool) -> Result<(), String> {
     if !args.is_empty() {
-        return Err(format!("`vcam {}` takes no arguments", if unregister { "uninstall" } else { "install" }));
+        return Err(format!(
+            "`vcam {}` takes no arguments",
+            if unregister { "uninstall" } else { "install" }
+        ));
     }
-    let dll = if unregister {
-        zagcam_vcam_mgr::registered_dll().map_or_else(provider_dll, Ok)?
-    } else {
-        provider_dll()?
+    if !is_elevated() {
+        return elevate(if unregister { "uninstall" } else { "install" });
+    }
+    if unregister { uninstall() } else { install() }
+}
+
+fn install_root() -> Option<PathBuf> {
+    Some(program_files()?.join("ZagCam").join("VirtualCamera"))
+}
+
+#[cfg(windows)]
+fn program_files() -> Option<PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_ProgramFiles)
+}
+
+#[cfg(not(windows))]
+fn program_files() -> Option<PathBuf> {
+    std::env::var_os("ProgramFiles").map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn system32() -> Option<PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_System)
+}
+
+#[cfg(not(windows))]
+fn system32() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn known_folder(folder: &windows_sys::core::GUID) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    unsafe {
+        let mut raw: *mut u16 = std::ptr::null_mut();
+        let hr = SHGetKnownFolderPath(
+            folder,
+            KF_FLAG_DEFAULT as u32,
+            std::ptr::null_mut(),
+            &mut raw,
+        );
+        if hr < 0 || raw.is_null() {
+            return None;
+        }
+        let len = (0..).take_while(|&i| *raw.add(i) != 0).count();
+        let path = PathBuf::from(OsString::from_wide(std::slice::from_raw_parts(raw, len)));
+        CoTaskMemFree(raw.cast());
+        Some(path)
+    }
+}
+
+fn install_dll(source: &Path) -> Result<PathBuf, String> {
+    let bytes =
+        fs::read(source).map_err(|why| format!("reading {} failed: {why}", source.display()))?;
+    let hash = format!("{:x}", Sha256::digest(&bytes));
+    let root = install_root().ok_or("ProgramFiles is not set")?;
+    let dir = root.join(hash);
+    fs::create_dir_all(&dir).map_err(|why| format!("creating {} failed: {why}", dir.display()))?;
+    let dest = dir.join("zagcam_vcam.dll");
+    if !dest.exists() {
+        let temp = dir.join(format!("zagcam_vcam.dll.tmp-{}", std::process::id()));
+        fs::write(&temp, &bytes)
+            .map_err(|why| format!("writing {} failed: {why}", temp.display()))?;
+        fs::rename(&temp, &dest)
+            .map_err(|why| format!("moving the DLL into {} failed: {why}", dest.display()))?;
+    }
+    Ok(dest)
+}
+
+fn prune_installs(root: &Path, keep: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
     };
-    let system = std::env::var_os("SystemRoot").ok_or("SystemRoot is not set")?;
-    let regsvr32 = PathBuf::from(&system).join("System32").join("regsvr32.exe");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep || !path.is_dir() {
+            continue;
+        }
+        if let Err(why) = fs::remove_dir_all(&path) {
+            println!("could not remove old install {}: {why}", path.display());
+        }
+    }
+}
+
+fn install() -> Result<(), String> {
+    let source = provider_dll()?;
+    let installed = install_dll(&source)?;
+    run_regsvr32(&installed, false)?;
+    println!("registered {}", installed.display());
+    if let (Some(hash_dir), Some(root)) = (
+        installed.parent(),
+        installed.parent().and_then(Path::parent),
+    ) {
+        prune_installs(root, hash_dir);
+    }
+    Ok(())
+}
+
+fn uninstall() -> Result<(), String> {
+    if let Err(why) = zagcam_vcam_mgr::remove() {
+        println!("session camera: {why}");
+    }
+    match zagcam_vcam_mgr::registered_dll() {
+        Some(dll) if dll.exists() => run_regsvr32(&dll, true)?,
+        _ => zagcam_vcam_mgr::unregister_clsid()?,
+    }
+    if let Some(root) = install_root() {
+        match fs::remove_dir_all(&root) {
+            Ok(()) => println!("removed {}", root.display()),
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => {}
+            Err(why) => println!(
+                "could not remove {}: {why} (close apps using the camera and retry)",
+                root.display()
+            ),
+        }
+    }
+    println!("uninstalled");
+    Ok(())
+}
+
+fn run_regsvr32(dll: &Path, unregister: bool) -> Result<(), String> {
+    let regsvr32 = system32()
+        .ok_or("cannot find the Windows system directory")?
+        .join("regsvr32.exe");
     let mut command = Command::new(regsvr32);
     command.arg("/s");
     if unregister {
         command.arg("/u");
     }
-    command.arg(&dll);
-    let status = command.status().map_err(|why| format!("running regsvr32 failed: {why}"))?;
+    command.arg(dll);
+    let status = command
+        .status()
+        .map_err(|why| format!("running regsvr32 failed: {why}"))?;
     if !status.success() {
+        return Err(format!("regsvr32 failed ({status}) for {}", dll.display()));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    use std::mem::size_of;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        );
+        CloseHandle(token);
+        ok != 0 && elevation.TokenIsElevated != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn is_elevated() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn elevate(command: &str) -> Result<(), String> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe =
+        std::env::current_exe().map_err(|why| format!("cannot find this executable: {why}"))?;
+    let exe = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let verb = "runas".encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let params = format!("vcam {command}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: verb.as_ptr(),
+        lpFile: exe.as_ptr(),
+        lpParameters: params.as_ptr(),
+        nShow: SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
         return Err(format!(
-            "regsvr32 failed ({status}); run the command from an elevated shell, or use tools/vcam/install-dev.ps1"
+            "elevation failed: {}",
+            std::io::Error::last_os_error()
         ));
     }
-    println!("{} {}", if unregister { "unregistered" } else { "registered" }, dll.display());
-    Ok(())
+    unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 1u32;
+        GetExitCodeProcess(info.hProcess, &mut code);
+        windows_sys::Win32::Foundation::CloseHandle(info.hProcess);
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "elevated `vcam {command}` failed with exit code {code}"
+            ))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn elevate(_command: &str) -> Result<(), String> {
+    Err("virtual camera installation is Windows-only".into())
 }
