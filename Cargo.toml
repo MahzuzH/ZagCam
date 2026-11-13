@@ -21,8 +21,9 @@ sha2 = "0.10"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "rayon"] }
 serde_json = "1"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
-tray-icon = { version = "0.26", default-features = false, features = ["muda-common-controls-v6"] }
-rfd = { version = "0.18", default-features = false, features = ["common-controls-v6"] }
+# No comctl32 v6 features: TaskDialogIndirect needs an app manifest, or the exe fails to load.
+tray-icon = { version = "0.26", default-features = false }
+rfd = { version = "0.18", default-features = false }
 virtualcam = { version = "0.1.1", optional = true, default-features = false, features = ["obs"] }
 zagcam-vcam-mgr = { path = "crates/zagcam-vcam-mgr" }
 

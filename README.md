@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 code done (manual gates pending); M3 sprints 7–8 code done (manual gates pending), sprint 9 next.** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
+**Status: M2 code done (manual gates pending); M3 sprints 7–9 code done (manual gates pending).** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
 
 ## Why
 
@@ -96,19 +96,21 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: engine integration done; compatibility and soak gates remain)*
-4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(sprints 7–8 code done, manual gates pending; sprint 9 next)*
+4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(sprints 7–9 code done, manual gates pending)*
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
 7. **M6** — Linux, then **M7** — macOS.
 
 ## Build and usage
 
-M1 opens a webcam and can blur the background with a MediaPipe selfie-segmentation ONNX model, then show the result in a preview window or feed an OBS virtual camera.
+Normal use: `cargo run --release --` with no arguments opens the tray app and owns the ZagCam
+virtual camera for as long as it runs. The CLI below stays for development and diagnostics.
 
 ```sh
 cargo run --release -- --list                  # list cameras
-cargo run --release --                         # preview the first camera, no effect (Esc quits)
-cargo run --release -- --mode blur             # preview with background blur
+cargo run --release --                         # tray app (normal use)
+cargo run --release -- --sink window           # preview the first camera (Esc quits)
+cargo run --release -- --sink window --mode blur   # preview with background blur
 cargo run --release -- --mode blur --blur 80   # stronger blur (0..100)
 cargo run --release -- --probe 5 --mode blur   # headless, print fps / RAM / CPU and per-stage ms
 cargo run --release -- --sink mfvcam --mode blur   # feed ZagCam's own camera
@@ -123,25 +125,26 @@ Prefer `--release`: debug builds are an order of magnitude slower.
 needed. It expects a 256x144 RGB input scaled to 0..1 and outputs a person mask; see
 [models/LICENSE](models/LICENSE).
 
-### Own virtual camera (M2, in progress)
+### Own virtual camera (M2/M3, code done, manual gates pending)
 
 ZagCam has its own Media Foundation virtual camera (no OBS needed). Install the provider once,
-then start the camera and feed it from the engine:
+then launch the tray app:
 
 ```sh
 cargo build -p zagcam-vcam --release
 cargo run --release -- vcam install       # UAC once; copies to %ProgramFiles%\ZagCam\VirtualCamera
+cargo run --release --                    # normal use: tray app creates the camera and feeds it
 cargo run --release -- vcam status        # registered DLL + whether a source is live
-cargo run --release -- vcam start         # create the camera (Ctrl+C removes it)
-cargo run --release -- --sink mfvcam --mode blur   # second terminal: publish blurred frames
 cargo run --release -- vcam watch         # show the shared frame channel state
 cargo run --release -- --list             # virtual cameras are marked "(virtual)"
 cargo run --release -- vcam uninstall     # UAC once; removes the CLSID and installed copy
 ```
 
-The camera is session-scoped, so it disappears when `vcam start` exits. The engine opens the
-physical webcam only while an app is reading the virtual camera, and releases it after the
-client stops. Without an engine, the provider shows its built-in test pattern.
+The development path still works: `vcam start` creates a camera with the built-in test pattern,
+and `--sink mfvcam` publishes engine frames into it. The tray app instead owns the camera for
+its lifetime, so no `vcam start` is needed. The camera is session-scoped and disappears on Quit.
+The engine opens the physical webcam only while an app is reading the virtual camera, and
+releases it after the client stops. Without an engine, the provider shows its test pattern.
 
 `cargo run --release -- --camera N --probe 5` can read the virtual camera back as an input,
 which is a quick end-to-end check. `zagcam vcam feed` still publishes test frames for

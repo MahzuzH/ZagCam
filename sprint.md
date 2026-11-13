@@ -32,7 +32,7 @@ These can run in parallel with M3. M3 assumes the `--sink mfvcam` path is stable
 | --- | --- | --- |
 | 7 — settings and image mode | done (manual gate pending) | persisted config + image backgrounds in the engine |
 | 8 — tray app and settings window | done (manual gate pending) | tray icon, quick toggle, simple settings UI |
-| 9 — app lifecycle | todo | one app owns the camera; engine stays demand-driven end to end |
+| 9 — app lifecycle | done (manual gate pending) | one app owns the camera; engine stays demand-driven end to end |
 
 ### Sprint 7 — settings and image mode
 

@@ -120,23 +120,24 @@ fn worker(
         let wants = sink.wants_frame();
         camera_in_use.store(wants, Ordering::Relaxed);
 
+        if let Some(current) = session.as_ref()
+            && release_due(wants, current.last_active.elapsed())
+        {
+            println!("no client reading; releasing camera");
+            session = None;
+            applied = None;
+        }
         if !wants {
-            if session
-                .as_ref()
-                .is_some_and(|current| current.last_active.elapsed() >= IDLE_RELEASE)
-            {
-                session = None;
-                applied = None;
-            }
             std::thread::sleep(POLL_IDLE);
             continue;
         }
 
         if let Some(current) = session.as_ref()
-            && current.camera_key() != camera_key(&desired)
+            && source_changed(&current.key, &desired)
         {
             session = None;
             applied = None;
+            last_apply_error = None;
         }
 
         if session.is_none() {
@@ -226,6 +227,14 @@ fn camera_key(settings: &Settings) -> (Option<String>, usize) {
     (settings.camera_name.clone(), settings.camera_index)
 }
 
+fn source_changed(current: &(Option<String>, usize), desired: &Settings) -> bool {
+    *current != camera_key(desired)
+}
+
+fn release_due(wants: bool, idle: Duration) -> bool {
+    !wants && idle >= IDLE_RELEASE
+}
+
 struct Session {
     camera: Camera,
     rgb: Vec<u8>,
@@ -265,10 +274,6 @@ impl Session {
             height,
             last_active: Instant::now(),
         })
-    }
-
-    fn camera_key(&self) -> (Option<String>, usize) {
-        self.key.clone()
     }
 
     fn apply(&mut self, settings: &Settings) -> Result<(), String> {
@@ -330,8 +335,31 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_settings;
+    use super::{IDLE_RELEASE, fallback_settings, release_due, source_changed};
     use crate::settings::{Mode, Settings};
+    use std::time::Duration;
+
+    #[test]
+    fn camera_is_released_only_without_a_consumer_and_after_the_grace_period() {
+        assert!(!release_due(true, IDLE_RELEASE * 2));
+        assert!(!release_due(false, IDLE_RELEASE - Duration::from_millis(1)));
+        assert!(release_due(false, IDLE_RELEASE));
+    }
+
+    #[test]
+    fn changing_the_source_camera_requests_a_reopen() {
+        let key = (Some("Cam A".to_string()), 0);
+        let same = Settings {
+            camera_name: Some("Cam A".to_string()),
+            ..Settings::default()
+        };
+        let other = Settings {
+            camera_name: Some("Cam B".to_string()),
+            ..Settings::default()
+        };
+        assert!(!source_changed(&key, &same));
+        assert!(source_changed(&key, &other));
+    }
 
     #[test]
     fn only_image_mode_falls_back_to_off() {

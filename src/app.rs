@@ -84,7 +84,16 @@ impl App {
         }
     }
 
+    fn refresh_devices(&mut self) {
+        let cameras = capture::list().unwrap_or_default();
+        self.devices = cameras.iter().map(|camera| camera.human_name()).collect();
+        let index = self.current.camera_index(&cameras).unwrap_or(0);
+        self.saved_device_index = index.min(self.devices.len().saturating_sub(1));
+        self.device_index = self.saved_device_index;
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
+        self.refresh_devices();
         self.window_visible = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -126,6 +135,9 @@ impl App {
                 if !valid {
                     self.error = Some("Choose a valid background image first".to_string());
                     self.show_window(ctx);
+                    if let Some(tray) = &self.tray {
+                        tray.sync(&self.current);
+                    }
                     return;
                 }
             }
@@ -204,6 +216,10 @@ impl App {
                     }
                 },
             );
+            if ui.button("Refresh").clicked() {
+                self.refresh_devices();
+                self.message = None;
+            }
         });
 
         ui.horizontal(|ui| {
@@ -281,6 +297,10 @@ impl eframe::App for App {
         self.handle_tray(ctx);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.allow_exit {
+                return;
+            }
+            if self.tray.is_none() {
+                self.allow_exit = true;
                 return;
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -406,5 +426,16 @@ struct InstanceGuard;
 impl InstanceGuard {
     fn acquire() -> Result<Self, String> {
         Ok(Self)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::InstanceGuard;
+
+    #[test]
+    fn a_second_instance_is_rejected() {
+        let _first = InstanceGuard::acquire().expect("first instance");
+        assert!(InstanceGuard::acquire().is_err());
     }
 }
