@@ -237,7 +237,7 @@ Risks:
 
 Build (2026-11-14):
 
-- Visible beta version: `0.4.0-beta.1` in the title bar and `ZagCam.exe --version`.
+- Visible beta version: `0.5.0-beta.1` in the title bar and `ZagCam.exe --version`.
 - Package: `tools/package-beta.ps1` produces `dist\ZagCam-<version>.zip` plus a SHA-256 with the
   exe, provider DLL, model/license, notices, quickstart, feedback docs, known issues, and log
   collector.
@@ -319,12 +319,21 @@ Risks:
   `THIRD_PARTY_NOTICES.md`.
 - Long GIFs/high-resolution videos blow the memory budget; reject early instead of degrading.
 
+Completion (2026-11-14):
+
+- `BackgroundKind` detects still/GIF/video; GIF keeps per-frame delays, loops, caps the decoded
+  cache at 64 MB, and rejects oversized files. Video uses a Media Foundation source reader on a
+  worker thread and loops at EOF.
+- CLI/UI accept image, GIF, and video paths; corrupt/missing media falls back to off with an error.
+- Release probes: GIF 19.6 fps, 58.4 MiB, p95 24.9 ms; video 19.6 fps, 94.1�96.6 MiB, p95 29.7 ms.
+  A 15 s probe crossed the 13.3 s video clip without a stall. Details: `bench/m5-media.md`.
+- GIF clock/load, settings detection, and pipeline adjustment tests cover the new logic.
 ### Sprint 15 — presets, hotkeys, auto-start
 
 Work:
 
-1. Settings v4: named presets (mode, blur, image/media path, adjustments) and the active preset;
-   migrate v3 with defaults and keep corrupt-field recovery.
+1. Settings v3: named presets (mode, blur, image/media path, adjustments) and the active preset;
+   migrate v1/v2 with defaults and keep corrupt-field recovery.
 2. Tray menu switches presets in one click; settings UI edits/saves/deletes presets.
 3. Global hotkeys via `RegisterHotKey` (toggle effect, next preset, off); resolve conflicts with a
    visible error and no silent failure.
@@ -344,6 +353,16 @@ Risks:
 - Global hotkeys may collide with games/apps; keep registration best-effort and visible.
 - Presets increase settings schema surface; one migration path and one fallback rule.
 
+Completion (2026-11-14):
+
+- Settings schema v3 stores named presets (mode, blur, media path, quality, adjustments), the
+  opt-in hotkey flag, and the opt-in launch-at-login flag; v1/v2 files migrate with defaults.
+- Tray menu rebuilds from the saved presets; the settings window saves/applies/deletes presets.
+- Fixed global hotkeys: Ctrl+Alt+B toggle, Ctrl+Alt+N next preset, Ctrl+Alt+O off. Registration is
+  all-or-nothing; conflicts surface a visible error. Verified end-to-end with a temp settings file:
+  Ctrl+Alt+O switched to off and Ctrl+Alt+N applied the next preset.
+- Auto-start uses the HKCU Run key and is removed by `vcam uninstall`; registry quoting is tested.
+- Manual checks still pending: reboot auto-start, tray preset clicks, and real-meeting hotkeys.
 ### Sprint 16 — preview, adjustments, idle shell
 
 Work:
@@ -372,6 +391,18 @@ Risks:
   downscaled copy.
 - A native window is a larger change; only take it if lazy `eframe` cannot reach the RAM target.
 
+Completion (2026-11-14):
+
+- Live preview: the engine publishes a downscaled 320 px frame only while the settings window is
+  visible; the UI shows it as an egui texture. Preview frames never enter the virtual-camera path.
+- Mirror/flip and brightness/contrast are stored in settings/presets, applied after compositing,
+  and tested (pixel math + mirror order). CLI flags support headless checks.
+- The idle RAM exception is **not fixed**: with the settings window closed the tray still uses
+  73.3 MiB and ~0.6% CPU. `eframe` owns the cost; lazy-create/native shell is deferred to M6.
+  This is the reopened exception allowed by the Sprint 16 gate.
+- Preview CPU with a real consumer: 76.5% one core visible versus 71.0% hidden (GIF background), so
+  preview adds ~5.5% and stays within the 10% gate.
+- Manual gate still pending: visual preview check and idle RAM acceptance.
 ### Sprint 17 — signed installer and updater
 
 Work:
@@ -449,3 +480,9 @@ M5 is done when:
 - Do not re-enable the `rfd`/`tray-icon` `common-controls-v6` features without an application
   manifest: `TaskDialogIndirect` is missing from the comctl32 v5 shim and the exe fails to load
   with `STATUS_ENTRYPOINT_NOT_FOUND`.
+
+
+
+
+
+

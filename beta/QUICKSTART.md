@@ -18,12 +18,14 @@ work).
 
 ## Use
 
-1. Pick the source camera and choose Blur or Image in Settings. Save.
+1. Pick the source camera and choose Blur or Background in Settings. Save.
 2. In Meet, Teams, Discord, Zoom, or OBS select **ZagCam Camera**.
 3. The physical webcam starts only while an app reads ZagCam; Quit removes the session camera.
 
 Quality modes control the CPU/quality tradeoff: Eco is the lightest, Balanced is the default,
-Quality runs inference every frame.
+Quality runs inference every frame. Background accepts PNG/JPG/WebP/BMP, animated GIF, or a looping
+MP4/MOV/AVI/WMV/MKV file. Save named presets and enable global hotkeys (Ctrl+Alt+B toggle,
+Ctrl+Alt+N next preset, Ctrl+Alt+O off) in Settings. **Start with Windows** is opt-in.
 
 ## Uninstall
 

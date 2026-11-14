@@ -1,22 +1,50 @@
 use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+use image::AnimationDecoder;
+use image::codecs::gif::GifDecoder;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::segmenter::{Segmenter, IN_H, IN_W};
-use crate::settings::{Mode, Quality, validate_background};
+use crate::settings::{BackgroundKind, Mode, Quality, validate_background};
+use crate::video::VideoBackground;
 
 const EMA_ALPHA: u32 = 102; // 0.4 in 0..255
+const GIF_CACHE_LIMIT: usize = 64 * 1024 * 1024;
+const MIN_GIF_DELAY: Duration = Duration::from_millis(10);
 
-/// What the background is replaced with. Both paths use the same mask and `blend_rgb`.
+/// What the background is replaced with. All paths use the same mask and `blend_rgb`.
 pub enum BackgroundSource<'a> {
     Blur(u8),
-    Image(&'a Path),
+    Media(&'a Path),
 }
 
 enum Background {
     Blur,
-    Image(Image<'static>),
+    Still(Image<'static>),
+    Gif(GifBackground),
+    Video(VideoBackground),
+}
+
+struct GifBackground {
+    frames: Vec<Vec<u8>>,
+    delays: Vec<Duration>,
+    index: usize,
+    next: Instant,
+}
+
+impl GifBackground {
+    fn frame(&mut self, now: Instant) -> &[u8] {
+        if self.frames.len() > 1 {
+            while now >= self.next {
+                self.index = (self.index + 1) % self.frames.len();
+                self.next += self.delays[self.index];
+            }
+        }
+        &self.frames[self.index]
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -26,6 +54,14 @@ pub struct Timings {
     pub mask: Duration,
     pub blur: Duration,
     pub composite: Duration,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Adjustments {
+    mirror: bool,
+    flip: bool,
+    brightness: i8,
+    contrast: i8,
 }
 
 pub struct Pipeline {
@@ -45,10 +81,12 @@ pub struct Pipeline {
     blur_full: Image<'static>,
     background: Background,
     out: Vec<u8>,
+    post: Vec<u8>,
     frame: u64,
     mask_w: usize,
     mask_div: usize,
     quality: Quality,
+    adjust: Adjustments,
     pub timings: Timings,
     pub samples: u64,
 }
@@ -86,10 +124,12 @@ impl Pipeline {
             blur_full: Image::new(width as u32, height as u32, PixelType::U8x3),
             background: Background::Blur,
             out: vec![0u8; pixels * 3],
+            post: vec![0u8; pixels * 3],
             frame: 0,
             mask_w,
             mask_div,
             quality,
+            adjust: Adjustments::default(),
             timings: Timings::default(),
             samples: 0,
         })
@@ -118,7 +158,7 @@ impl Pipeline {
                 let path = background.ok_or("image mode needs a background image (--background PATH)")?;
                 let mut pipeline =
                     Self::new(Segmenter::load(model)?, width, height, blur, quality)?;
-                pipeline.configure(BackgroundSource::Image(path))?;
+                pipeline.configure(BackgroundSource::Media(path))?;
                 Ok(Some(pipeline))
             }
         }
@@ -132,9 +172,9 @@ impl Pipeline {
                 self.background = Background::Blur;
                 Ok(())
             }
-            BackgroundSource::Image(path) => {
-                let image = load_background(path, self.width, self.height)?;
-                self.background = Background::Image(image);
+            BackgroundSource::Media(path) => {
+                let background = load_media(path, self.width, self.height)?;
+                self.background = background;
                 Ok(())
             }
         }
@@ -156,6 +196,15 @@ impl Pipeline {
         }
     }
 
+    pub fn set_adjustments(&mut self, mirror: bool, flip: bool, brightness: i8, contrast: i8) {
+        self.adjust = Adjustments {
+            mirror,
+            flip,
+            brightness: brightness.clamp(-100, 100),
+            contrast: contrast.clamp(-100, 100),
+        };
+    }
+
     fn set_blur(&mut self, intensity: u8) {
         let div = blur_div(intensity);
         let (width, height) = ((self.width / div).max(1) as u32, (self.height / div).max(1) as u32);
@@ -164,8 +213,8 @@ impl Pipeline {
         }
     }
 
-    /// Blurs the background of `rgb` in place into the internal output buffer,
-    /// which is returned. `rgb` is 24-bit RGB at the pipeline resolution.
+    /// Blurs or replaces the background of `rgb`, returning the internal output buffer.
+    /// `rgb` is 24-bit RGB at the pipeline resolution.
     pub fn process(&mut self, rgb: &[u8]) -> Result<&[u8], String> {
         let (w, h) = (self.width as u32, self.height as u32);
         let mut t = Instant::now();
@@ -225,23 +274,103 @@ impl Pipeline {
         }
 
         t = Instant::now();
-        let background: &[u8] = match &self.background {
-            Background::Blur => self.blur_full.buffer(),
-            Background::Image(image) => image.buffer(),
-        };
-        blend_rgb(
-            rgb,
-            background,
-            &self.ema,
-            self.mask_w,
-            self.mask_div,
-            self.width,
-            &mut self.out,
-        );
+        match &mut self.background {
+            Background::Blur => {
+                blend_rgb(
+                    rgb,
+                    self.blur_full.buffer(),
+                    &self.ema,
+                    self.mask_w,
+                    self.mask_div,
+                    self.width,
+                    &mut self.out,
+                );
+            }
+            Background::Still(image) => {
+                blend_rgb(
+                    rgb,
+                    image.buffer(),
+                    &self.ema,
+                    self.mask_w,
+                    self.mask_div,
+                    self.width,
+                    &mut self.out,
+                );
+            }
+            Background::Gif(gif) => {
+                let background = gif.frame(Instant::now());
+                blend_rgb(
+                    rgb,
+                    background,
+                    &self.ema,
+                    self.mask_w,
+                    self.mask_div,
+                    self.width,
+                    &mut self.out,
+                );
+            }
+            Background::Video(video) => {
+                let background = video.next_frame()?;
+                blend_rgb(
+                    rgb,
+                    background,
+                    &self.ema,
+                    self.mask_w,
+                    self.mask_div,
+                    self.width,
+                    &mut self.out,
+                );
+            }
+        }
         self.timings.composite += t.elapsed();
         self.samples += 1;
-        Ok(&self.out)
+        if self.adjust.mirror || self.adjust.flip || self.adjust.brightness != 0 || self.adjust.contrast != 0 {
+            self.post_process();
+            Ok(&self.post)
+        } else {
+            Ok(&self.out)
+        }
     }
+
+    fn post_process(&mut self) {
+        apply_adjustments(
+            &self.out,
+            &mut self.post,
+            self.width,
+            self.height,
+            self.adjust,
+        );
+    }
+}
+
+fn apply_adjustments(
+    source: &[u8],
+    target: &mut [u8],
+    width: usize,
+    height: usize,
+    adjust: Adjustments,
+) {
+    use rayon::prelude::*;
+    let row = width * 3;
+    let factor = 100 + i32::from(adjust.contrast);
+    let bias = i32::from(adjust.brightness) * 255 / 100;
+    target
+        .par_chunks_mut(row)
+        .enumerate()
+        .for_each(|(y, target_row)| {
+            let source_y = if adjust.flip { height - 1 - y } else { y };
+            let source_row = &source[source_y * row..(source_y + 1) * row];
+            for x in 0..width {
+                let source_x = if adjust.mirror { width - 1 - x } else { x };
+                let from = source_x * 3;
+                let to = x * 3;
+                for channel in 0..3 {
+                    let value = i32::from(source_row[from + channel]);
+                    let value = (value - 128) * factor / 100 + 128 + bias;
+                    target_row[to + channel] = value.clamp(0, 255) as u8;
+                }
+            }
+        });
 }
 
 fn resize_err(why: impl std::fmt::Display) -> String {
@@ -253,9 +382,18 @@ pub fn blur_div(intensity: u8) -> usize {
     2 + usize::from(intensity.min(100)) / 12
 }
 
+fn load_media(path: &Path, width: usize, height: usize) -> Result<Background, String> {
+    match validate_background(path)? {
+        BackgroundKind::Still => Ok(Background::Still(load_still(path, width, height)?)),
+        BackgroundKind::Gif => Ok(Background::Gif(load_gif(path, width, height)?)),
+        BackgroundKind::Video => Ok(Background::Video(VideoBackground::open(
+            path, width, height,
+        )?)),
+    }
+}
+
 /// Decodes PNG/JPEG once and stretches it to the capture size.
-fn load_background(path: &Path, width: usize, height: usize) -> Result<Image<'static>, String> {
-    validate_background(path)?;
+fn load_still(path: &Path, width: usize, height: usize) -> Result<Image<'static>, String> {
     let decoded = image::ImageReader::open(path)
         .map_err(|why| format!("cannot open {}: {why}", path.display()))?
         .with_guessed_format()
@@ -263,7 +401,52 @@ fn load_background(path: &Path, width: usize, height: usize) -> Result<Image<'st
         .decode()
         .map_err(|why| format!("cannot decode {}: {why}", path.display()))?;
     let rgb = decoded.to_rgb8();
-    let source = ImageRef::new(rgb.width(), rgb.height(), rgb.as_raw(), PixelType::U8x3)
+    resize_rgb(rgb.as_raw(), rgb.width(), rgb.height(), width, height)
+}
+
+fn load_gif(path: &Path, width: usize, height: usize) -> Result<GifBackground, String> {
+    let file = File::open(path).map_err(|why| format!("cannot open {}: {why}", path.display()))?;
+    let decoder = GifDecoder::new(BufReader::new(file))
+        .map_err(|why| format!("cannot decode {}: {why}", path.display()))?;
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    let mut bytes = 0usize;
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(|why| format!("cannot decode {}: {why}", path.display()))?;
+        let delay = Duration::from(frame.delay()).max(MIN_GIF_DELAY);
+        let rgba = frame.buffer();
+        let rgb = resize_rgb(rgba.as_raw(), rgba.width(), rgba.height(), width, height)?;
+        bytes += rgb.buffer().len();
+        if bytes > GIF_CACHE_LIMIT {
+            return Err(format!(
+                "{} is too large once decoded (over {} MB)",
+                path.display(),
+                GIF_CACHE_LIMIT / 1024 / 1024
+            ));
+        }
+        frames.push(rgb.buffer().to_vec());
+        delays.push(delay);
+    }
+    if frames.is_empty() {
+        return Err(format!("{} has no frames", path.display()));
+    }
+    let first_delay = delays[0];
+    Ok(GifBackground {
+        frames,
+        delays,
+        index: 0,
+        next: Instant::now() + first_delay,
+    })
+}
+
+fn resize_rgb(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    width: usize,
+    height: usize,
+) -> Result<Image<'static>, String> {
+    let source = ImageRef::new(source_width, source_height, source, PixelType::U8x3)
         .map_err(resize_err)?;
     let mut resized = Image::new(width as u32, height as u32, PixelType::U8x3);
     let options = ResizeOptions::new().resize_alg(ResizeAlg::Interpolation(FilterType::Bilinear));
@@ -318,10 +501,12 @@ pub fn blend_rgb(
 
 #[cfg(test)]
 mod tests {
-    use super::{blend_rgb, blur_div, ema_u8, load_background};
+    use super::{Adjustments, GifBackground, MIN_GIF_DELAY, apply_adjustments, blend_rgb, blur_div, ema_u8, load_media};
+    use crate::settings::BackgroundKind;
     use fast_image_resize::PixelType;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
 
     fn temp_png(width: u32, height: u32) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -334,6 +519,28 @@ mod tests {
         image
             .save_with_format(&path, image::ImageFormat::Png)
             .expect("write test png");
+        path
+    }
+
+    fn temp_gif() -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "zagcam-test-{}-{n}.gif",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create gif");
+        let mut encoder = image::codecs::gif::GifEncoder::new(file);
+        for color in [[10, 20, 30, 255], [200, 210, 220, 255]] {
+            let rgba = image::RgbaImage::from_pixel(2, 2, image::Rgba(color));
+            let frame = image::Frame::from_parts(
+                rgba,
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(40, 1),
+            );
+            encoder.encode_frame(frame).expect("write gif frame");
+        }
         path
     }
 
@@ -380,26 +587,78 @@ mod tests {
     #[test]
     fn background_is_resized_to_the_capture_size() {
         let path = temp_png(4, 2);
-        let resized = load_background(&path, 8, 4).expect("load background");
+        let background = load_media(&path, 8, 4).expect("load background");
         let _ = std::fs::remove_file(&path);
 
+        let super::Background::Still(resized) = background else {
+            panic!("expected a still background");
+        };
         assert_eq!(resized.pixel_type(), PixelType::U8x3);
         assert_eq!(resized.buffer().len(), 8 * 4 * 3);
         assert!(resized.buffer().as_chunks::<3>().0.iter().all(|p| p == &[10, 20, 30]));
     }
 
     #[test]
+    fn gif_loads_every_frame() {
+        let path = temp_gif();
+        let background = load_media(&path, 8, 4).expect("load gif");
+        let _ = std::fs::remove_file(&path);
+        let super::Background::Gif(gif) = background else {
+            panic!("expected a gif background");
+        };
+        assert_eq!(gif.frames.len(), 2);
+        assert_eq!(gif.delays[0], Duration::from_millis(40));
+        assert_eq!(gif.frames[0].len(), 8 * 4 * 3);
+    }
+
+    #[test]
+    fn gif_clock_uses_frame_delays() {
+        let start = Instant::now();
+        let mut gif = GifBackground {
+            frames: vec![vec![0], vec![1]],
+            delays: vec![MIN_GIF_DELAY, MIN_GIF_DELAY],
+            index: 0,
+            next: start + MIN_GIF_DELAY,
+        };
+        assert_eq!(gif.frame(start), &[0]);
+        let later = start + MIN_GIF_DELAY + Duration::from_millis(1);
+        assert_eq!(gif.frame(later), &[1]);
+    }
+
+    #[test]
     fn missing_background_is_an_error() {
         let path = std::env::temp_dir().join("zagcam-definitely-missing.png");
         let _ = std::fs::remove_file(&path);
-        assert!(load_background(&path, 8, 4).is_err());
+        assert!(load_media(&path, 8, 4).is_err());
     }
 
     #[test]
     fn corrupt_background_is_an_error() {
         let path = std::env::temp_dir().join(format!("zagcam-corrupt-{}.png", std::process::id()));
         std::fs::write(&path, b"not an image").expect("write corrupt file");
-        assert!(load_background(&path, 8, 4).is_err());
+        assert!(load_media(&path, 8, 4).is_err());
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn background_kind_detects_gif() {
+        let path = temp_gif();
+        assert_eq!(
+            crate::settings::validate_background(&path),
+            Ok(BackgroundKind::Gif)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mirror_flip_and_contrast_are_applied() {
+        let source = [10u8, 20, 30, 40, 50, 60];
+        let mut target = [0u8; 6];
+        apply_adjustments(&source, &mut target, 2, 1, Adjustments { mirror: true, ..Adjustments::default() });
+        assert_eq!(target, [40, 50, 60, 10, 20, 30]);
+
+        apply_adjustments(&source, &mut target, 2, 1, Adjustments { contrast: -100, ..Adjustments::default() });
+        assert_eq!(target, [128, 128, 128, 128, 128, 128]);
+    }
 }
+

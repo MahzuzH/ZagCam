@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), Sprint 12 tooling ready, Sprint 13 beta package ready.** Capture, background blur, image replacement, quality modes, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. Next is running the compatibility matrix/soak and the closed beta.
+**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), Sprint 12 tooling ready, Sprint 13 beta package ready; M5 sprints 14–16 implemented (idle RAM exception open), 17–18 pending.** Capture, blur, image/GIF/video backgrounds, presets/hotkeys, live preview, adjustments, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it.
 
 ## Why
 
@@ -17,20 +17,23 @@ Lightweight virtual camera that blurs or replaces your webcam background. Pick "
 **MVP (Windows)**
 
 - Capture from a physical webcam, choose the source camera.
-- Modes: off (pass-through), background blur (adjustable intensity), image replacement.
+- Modes: off (pass-through), background blur (adjustable intensity), image/GIF/video backgrounds.
 - One virtual camera visible to Chrome, Edge, Discord, Teams.
 - Tray app with quick toggle and a simple settings window.
 - Physical camera opened only while the virtual camera is in use.
 - Quality modes (Eco / Balanced / Quality) controlling inference rate and resolution.
 
-**v1.0**
+**M5 (implemented in sprints 14–16)**
 
-- GIF and looping video backgrounds.
-- Presets and global hotkeys.
+- GIF and looping video backgrounds, bounded to 64 MB for GIFs.
+- Named presets, tray switching, and global hotkeys (Ctrl+Alt+B/N/O).
 - Live preview in settings.
 - Mirror/flip, basic brightness and contrast.
-- Optional start with the OS.
-- Digitally signed installer and update mechanism.
+- Optional start with Windows.
+
+**v1.0 remaining**
+
+- Digitally signed installer and update mechanism (sprint 17).
 
 **Later:** Linux, macOS, Windows 10 (if demand), GPU/NPU acceleration, higher-quality matting model.
 
@@ -87,8 +90,8 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 - **Capture:** `nokhwa`
 - **Inference:** `ort` (ONNX Runtime), MediaPipe Selfie Segmentation (landscape, 256x144) as the starting model
 - **Compositing:** CPU with SIMD (`fast_image_resize`) and `rayon`; `wgpu` as an optional GPU path
-- **GIF decoding:** `gif` / `image`, frames kept at native GIF resolution
-- **Windows API:** `windows` crate, `MFCreateVirtualCamera`
+- **Media backgrounds:** `image` for stills/GIF; Media Foundation `IMFSourceReader` for looping video
+- **Windows API:** `windows`/`windows-sys`, `MFCreateVirtualCamera`, `RegisterHotKey`, HKCU Run key
 - **UI:** tray app with `eframe`/`egui`, tray menu with `tray-icon`
 - **Build:** `opt-level = 3`, LTO, `codegen-units = 1`, `strip = true`
 
@@ -99,7 +102,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 tooling/package ready)*
-6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism. *(planned: sprints 14–18)*
+6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism. *(sprints 14–16 implemented; 17–18 pending)*
 7. **M6** — Linux, then **M7** — macOS.
 
 ## Build and usage
@@ -159,7 +162,7 @@ powershell -ExecutionPolicy Bypass -File tools\package-beta.ps1
 
 Produces `dist\ZagCam-<version>.zip` (unsigned) with the exe, provider DLL, model, notices,
 quickstart, feedback docs, known issues, and a log collector, plus a SHA-256. The visible beta
-version is `0.4.0-beta.1` (`ZagCam.exe --version`). Install/verify helpers:
+version is `0.5.0-beta.1` (`ZagCam.exe --version`). Install/verify helpers:
 `tools/verify-install.ps1` (package checks, and elevated install/reinstall/uninstall checks),
 `tools/collect-logs.ps1`, `tools/soak.ps1`. Test tracking: `compat/matrix.md`,
 `compat/edge-cases.md`, `beta/tester-tracker.csv`.
@@ -188,7 +191,7 @@ First frame is 224–248 ms and the compressed package is 11.37 MiB. Eco meets t
 RAM budgets; balanced and quality trade CPU for quality and are documented. The reference camera
 delivers ~19 fps raw, so the 30 fps floor is an exception until Sprint 12 tests a 30 fps camera.
 Idle tray RAM is 73.4 MiB against the 15 MiB target; `eframe` owns that cost, and the lazy/native
-settings window is scheduled for M5.
+settings window is deferred to M6.
 
 Media Foundation reports a bogus 1 fps in the media type, so trust the measured fps, not the
 printed format line.
@@ -196,3 +199,4 @@ printed format line.
 ## License and name
 
 TBD. "ZagCam" is a working title.
+

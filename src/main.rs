@@ -1,6 +1,8 @@
 mod app;
+mod autostart;
 mod capture;
 mod engine;
+mod hotkeys;
 mod nv12;
 mod pipeline;
 mod segmenter;
@@ -8,6 +10,7 @@ mod settings;
 mod sink;
 mod stats;
 mod vcam;
+mod video;
 
 use nokhwa::Camera;
 use nokhwa::pixel_format::RgbFormat;
@@ -34,7 +37,11 @@ Options:
   --blur 0..100     blur intensity (default 50)
   --quality eco|balanced|quality
                     inference cadence and mask resolution (default balanced)
-  --background PATH background image for --mode image
+  --background PATH image, GIF, or looping video for --mode image
+  --mirror          mirror the output horizontally
+  --flip            flip the output vertically
+  --brightness N    -100..100 (default 0)
+  --contrast N      -100..100 (default 0)
   --sink window|vcam|mfvcam
                     output: preview window, OBS virtual camera, or ZagCam camera (default window)
   --model PATH      ONNX segmentation model
@@ -75,6 +82,10 @@ struct Args {
     blur: u8,
     quality: Quality,
     background: Option<PathBuf>,
+    mirror: bool,
+    flip: bool,
+    brightness: i8,
+    contrast: i8,
     sink: SinkKind,
     model: PathBuf,
     probe: Option<f64>,
@@ -165,6 +176,9 @@ fn run() -> Result<(), String> {
         args.background.as_deref(),
         args.quality,
     )?;
+    if let Some(pipeline) = pipeline.as_mut() {
+        pipeline.set_adjustments(args.mirror, args.flip, args.brightness, args.contrast);
+    }
 
     if let Some(secs) = args.probe {
         return probe(&mut camera, &mut rgb, secs, pipeline.as_mut());
@@ -182,6 +196,10 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         blur: 50,
         quality: Quality::Balanced,
         background: None,
+        mirror: false,
+        flip: false,
+        brightness: 0,
+        contrast: 0,
         sink: SinkKind::Window,
         model: default_model(),
         probe: None,
@@ -214,6 +232,18 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
                     .ok_or_else(|| format!("unknown quality {raw}"))?;
             }
             "--background" => args.background = Some(PathBuf::from(value()?)),
+            "--mirror" => args.mirror = true,
+            "--flip" => args.flip = true,
+            "--brightness" => {
+                args.brightness = value()?
+                    .parse()
+                    .map_err(|_| "bad brightness".to_string())?;
+            }
+            "--contrast" => {
+                args.contrast = value()?
+                    .parse()
+                    .map_err(|_| "bad contrast".to_string())?;
+            }
             "--sink" => {
                 args.sink = match value()?.as_str() {
                     "window" => SinkKind::Window,
@@ -283,7 +313,7 @@ impl CaptureSession {
         let camera = capture::open(index, max_w, max_h)?;
         let format = camera.camera_format();
         let (width, height) = (format.width() as usize, format.height() as usize);
-        let pipeline = Pipeline::build(
+        let mut pipeline = Pipeline::build(
             args.mode,
             &args.model,
             width,
@@ -292,6 +322,9 @@ impl CaptureSession {
             args.background.as_deref(),
             args.quality,
         )?;
+        if let Some(pipeline) = pipeline.as_mut() {
+            pipeline.set_adjustments(args.mirror, args.flip, args.brightness, args.contrast);
+        }
         println!("camera opened: {width}x{height}");
         Ok(Self {
             camera,
@@ -499,3 +532,5 @@ mod tests {
         assert_eq!(percentile(&samples, 95), 4.0);
     }
 }
+
+

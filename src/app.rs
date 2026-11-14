@@ -8,15 +8,24 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use zagcam_vcam_mgr::VirtualCamera;
 
+use crate::autostart;
 use crate::capture;
 use crate::engine::Engine;
-use crate::settings::{Mode, Quality, Settings, validate_background};
+use crate::hotkeys::{HotkeyEvent, Hotkeys};
+use crate::settings::{
+    MAX_ADJUST, MAX_PRESETS, Mode, Preset, Quality, Settings, validate_background,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run(model: PathBuf) -> Result<(), String> {
     let _instance = InstanceGuard::acquire()?;
     let settings = Settings::load();
+    if settings.auto_start
+        && let Err(why) = autostart::set_enabled(true)
+    {
+        eprintln!("zagcam: cannot restore launch at login: {why}");
+    }
     let camera = VirtualCamera::start()?;
     let engine = Engine::spawn(settings.clone(), model)?;
 
@@ -25,7 +34,7 @@ pub fn run(model: PathBuf) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("ZagCam {VERSION}"))
-            .with_inner_size([440.0, 380.0])
+            .with_inner_size([520.0, 780.0])
             .with_visible(visible),
         ..Default::default()
     };
@@ -54,6 +63,10 @@ struct App {
     message: Option<String>,
     error: Option<String>,
     tray: Option<Tray>,
+    hotkeys: Option<Hotkeys>,
+    preset_name: String,
+    preset_cursor: usize,
+    preview_texture: Option<egui::TextureHandle>,
 }
 
 impl App {
@@ -70,6 +83,7 @@ impl App {
             Mode::Off => Mode::Blur,
             mode => mode,
         };
+        let hotkeys = settings.hotkeys.then(Hotkeys::start);
         Self {
             engine,
             draft: settings.clone(),
@@ -83,6 +97,10 @@ impl App {
             message: None,
             error: None,
             tray,
+            hotkeys,
+            preset_name: String::new(),
+            preset_cursor: 0,
+            preview_texture: None,
         }
     }
 
@@ -102,6 +120,8 @@ impl App {
     }
 
     fn commit(&mut self, settings: Settings) -> bool {
+        let auto_changed = settings.auto_start != self.current.auto_start;
+        let hotkeys_changed = settings.hotkeys != self.current.hotkeys;
         let saved = match settings.save() {
             Ok(()) => {
                 self.current = settings.clone();
@@ -116,10 +136,119 @@ impl App {
                 false
             }
         };
+        if saved && auto_changed
+            && let Err(why) = autostart::set_enabled(self.current.auto_start)
+        {
+            self.error = Some(format!("cannot update launch at login: {why}"));
+        }
+        if saved && hotkeys_changed {
+            self.sync_hotkeys();
+        }
         if let Some(tray) = &self.tray {
             tray.sync(&self.current);
         }
         saved
+    }
+
+    fn sync_hotkeys(&mut self) {
+        if self.current.hotkeys {
+            if self.hotkeys.is_none() {
+                self.hotkeys = Some(Hotkeys::start());
+            }
+        } else {
+            self.hotkeys = None;
+        }
+    }
+
+    fn apply_preset(&mut self, index: usize) {
+        let Some(preset) = self.current.presets.get(index).cloned() else {
+            return;
+        };
+        if preset.mode == Mode::Image
+            && !preset
+                .background
+                .as_deref()
+                .is_some_and(|path| validate_background(path).is_ok())
+        {
+            self.error = Some(format!("preset \"{}\" has no valid background", preset.name));
+            return;
+        }
+        let mut next = self.current.clone();
+        next.apply_preset(&preset);
+        self.preset_cursor = index;
+        if self.commit(next) {
+            self.message = Some(format!("Applied \"{}\"", preset.name));
+        }
+    }
+
+    fn save_preset(&mut self) {
+        let name = self.preset_name.trim().to_string();
+        if name.is_empty() {
+            self.error = Some("Preset name is empty".to_string());
+            return;
+        }
+        let mut next = self.draft.clone();
+        next.camera_name = self.devices.get(self.device_index).cloned();
+        next.camera_index = self.device_index;
+        if next.mode == Mode::Image
+            && !next
+                .background
+                .as_deref()
+                .is_some_and(|path| validate_background(path).is_ok())
+        {
+            self.error = Some("Choose a valid background first".to_string());
+            return;
+        }
+        next.presets.retain(|preset| preset.name != name);
+        next.presets.push(Preset::capture(name, &next));
+        if next.presets.len() > MAX_PRESETS {
+            next.presets.remove(0);
+        }
+        if self.commit(next) {
+            self.preset_name.clear();
+        }
+    }
+
+    fn delete_preset(&mut self, index: usize) {
+        let mut next = self.draft.clone();
+        if index < next.presets.len() {
+            next.presets.remove(index);
+            self.commit(next);
+        }
+    }
+
+    fn cycle_preset(&mut self) {
+        let count = self.current.presets.len();
+        if count == 0 {
+            self.message = Some("No presets saved".to_string());
+            return;
+        }
+        let index = (self.preset_cursor + 1) % count;
+        self.apply_preset(index);
+    }
+
+    fn handle_hotkeys(&mut self, ctx: &egui::Context) {
+        let Some(hotkeys) = &self.hotkeys else {
+            return;
+        };
+        let mut events = Vec::new();
+        while let Some(event) = hotkeys.try_recv() {
+            events.push(event);
+        }
+        for event in events {
+            match event {
+                HotkeyEvent::Toggle => self.toggle(ctx),
+                HotkeyEvent::NextPreset => self.cycle_preset(),
+                HotkeyEvent::Off => self.set_mode(ctx, Mode::Off),
+                HotkeyEvent::Unavailable => {
+                    self.error = Some(
+                        "Global hotkeys are unavailable; another app may own Ctrl+Alt+B/N/O"
+                            .to_string(),
+                    );
+                    self.hotkeys = None;
+                }
+            }
+        }
     }
 
     fn set_mode(&mut self, ctx: &egui::Context, mode: Mode) {
@@ -135,7 +264,7 @@ impl App {
                     .as_deref()
                     .is_some_and(|path| validate_background(path).is_ok());
                 if !valid {
-                    self.error = Some("Choose a valid background image first".to_string());
+                    self.error = Some("Choose a valid background first".to_string());
                     self.show_window(ctx);
                     if let Some(tray) = &self.tray {
                         tray.sync(&self.current);
@@ -169,7 +298,7 @@ impl App {
                     }
                 }
                 None => {
-                    self.error = Some("image mode needs a background image".to_string());
+                    self.error = Some("background mode needs a file".to_string());
                     return;
                 }
             }
@@ -181,7 +310,12 @@ impl App {
 
     fn handle_tray(&mut self, ctx: &egui::Context) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            match event.id.0.as_str() {
+            let id = event.id.0.as_str();
+            if let Some(index) = id.strip_prefix("preset:").and_then(|index| index.parse().ok()) {
+                self.apply_preset(index);
+                continue;
+            }
+            match id {
                 "toggle" => self.toggle(ctx),
                 "off" => self.set_mode(ctx, Mode::Off),
                 "blur" => self.set_mode(ctx, Mode::Blur),
@@ -227,7 +361,11 @@ impl App {
 
         ui.horizontal(|ui| {
             ui.label("Mode");
-            for (mode, label) in [(Mode::Off, "Off"), (Mode::Blur, "Blur"), (Mode::Image, "Image")] {
+            for (mode, label) in [
+                (Mode::Off, "Off"),
+                (Mode::Blur, "Blur"),
+                (Mode::Image, "Background"),
+            ] {
                 if ui.selectable_value(&mut self.draft.mode, mode, label).clicked() {
                     self.message = None;
                 }
@@ -259,6 +397,28 @@ impl App {
         }
 
         ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.draft.mirror, "Mirror").changed() {
+                self.message = None;
+            }
+            if ui.checkbox(&mut self.draft.flip, "Flip").changed() {
+                self.message = None;
+            }
+        });
+        let brightness = ui.add(
+            egui::Slider::new(
+                &mut self.draft.brightness,
+                -MAX_ADJUST..=MAX_ADJUST,
+            )
+            .text("Brightness"),
+        );
+        let contrast = ui.add(
+            egui::Slider::new(&mut self.draft.contrast, -MAX_ADJUST..=MAX_ADJUST).text("Contrast"),
+        );
+        if brightness.changed() || contrast.changed() {
+            self.message = None;
+        }
+
+        ui.horizontal(|ui| {
             let background = self
                 .draft
                 .background
@@ -267,14 +427,59 @@ impl App {
             ui.label("Background");
             ui.label(background);
         });
-        if ui.button("Choose image…").clicked()
+        if ui.button("Choose background...").clicked()
             && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg"])
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+                .add_filter("GIF", &["gif"])
+                .add_filter("Videos", &["mp4", "m4v", "mov", "avi", "wmv", "mkv"])
                 .pick_file()
         {
             self.draft.background = Some(path);
             self.message = None;
         }
+
+        ui.separator();
+        ui.label("Presets");
+        let mut apply = None;
+        let mut delete = None;
+        let names: Vec<String> = self
+            .draft
+            .presets
+            .iter()
+            .map(|preset| preset.name.clone())
+            .collect();
+        for (index, name) in names.into_iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(&name);
+                if ui.small_button("Apply").clicked() {
+                    apply = Some(index);
+                }
+                if ui.small_button("Delete").clicked() {
+                    delete = Some(index);
+                }
+            });
+        }
+        if let Some(index) = apply {
+            self.apply_preset(index);
+        }
+        if let Some(index) = delete {
+            self.delete_preset(index);
+        }
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.preset_name);
+            if ui.button("Save preset").clicked() {
+                self.save_preset();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut self.draft.auto_start, "Start with Windows").changed() {
+                self.message = None;
+            }
+            if ui.checkbox(&mut self.draft.hotkeys, "Global hotkeys").changed() {
+                self.message = None;
+            }
+        });
+        ui.label("Hotkeys: Ctrl+Alt+B toggle, Ctrl+Alt+N next preset, Ctrl+Alt+O off.");
 
         ui.separator();
         let in_use = self.engine.camera_in_use();
@@ -309,11 +514,33 @@ impl App {
             ui.label(message);
         }
     }
+
+    fn preview_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(frame) = self.engine.preview() else {
+            ui.label("Preview starts when an app opens ZagCam Camera.");
+            return;
+        };
+        let image = egui::ColorImage::from_rgb([frame.width, frame.height], &frame.rgb);
+        if let Some(texture) = &mut self.preview_texture {
+            texture.set(image, egui::TextureOptions::LINEAR);
+        } else {
+            self.preview_texture = Some(ui.ctx().load_texture(
+                "zagcam-preview",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+        if let Some(texture) = &self.preview_texture {
+            ui.add(egui::Image::new((texture.id(), texture.size_vec2())).max_width(320.0));
+        }
+    }
 }
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_tray(ctx);
+        self.handle_hotkeys(ctx);
+        self.engine.set_preview_wanted(self.window_visible);
         if ctx.input(|input| input.viewport().close_requested()) {
             if self.allow_exit {
                 return;
@@ -325,6 +552,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_visible = false;
+            self.engine.set_preview_wanted(false);
         }
         let interval = if self.window_visible { 150 } else { 1_000 };
         ctx.request_repaint_after(Duration::from_millis(interval));
@@ -335,40 +563,19 @@ impl eframe::App for App {
             return;
         }
         ui.add_space(10.0);
+        self.preview_ui(ui);
+        ui.add_space(6.0);
         self.settings_ui(ui);
     }
 }
 
 struct Tray {
-    _icon: TrayIcon,
-    enable: CheckMenuItem,
+    icon: TrayIcon,
 }
 
 impl Tray {
     fn build(settings: &Settings) -> Option<Self> {
-        let enable = CheckMenuItem::with_id(
-            "toggle",
-            "Enabled",
-            true,
-            settings.mode != Mode::Off,
-            None,
-        );
-        let off = MenuItem::with_id("off", "Off", true, None);
-        let blur = MenuItem::with_id("blur", "Blur", true, None);
-        let image = MenuItem::with_id("image", "Image", true, None);
-        let open = MenuItem::with_id("open", "Settings…", true, None);
-        let quit = MenuItem::with_id("quit", "Quit", true, None);
-        let menu = Menu::new();
-        menu.append_items(&[
-            &enable,
-            &off,
-            &blur,
-            &image,
-            &PredefinedMenuItem::separator(),
-            &open,
-            &quit,
-        ])
-        .ok()?;
+        let menu = menu_for(settings)?;
         let icon = Icon::from_rgba(icon_rgba(), 16, 16).ok()?;
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -380,17 +587,48 @@ impl Tray {
                 why
             })
             .ok()?;
-        Some(Self {
-            _icon: icon,
-            enable,
-        })
+        Some(Self { icon })
     }
 
     fn sync(&self, settings: &Settings) {
-        self.enable.set_checked(settings.mode != Mode::Off);
+        if let Some(menu) = menu_for(settings) {
+            self.icon.set_menu(Some(Box::new(menu)));
+        }
     }
 }
 
+fn menu_for(settings: &Settings) -> Option<Menu> {
+    let menu = Menu::new();
+    let enable = CheckMenuItem::with_id(
+        "toggle",
+        "Enabled",
+        true,
+        settings.mode != Mode::Off,
+        None,
+    );
+    let off = MenuItem::with_id("off", "Off", true, None);
+    let blur = MenuItem::with_id("blur", "Blur", true, None);
+    let image = MenuItem::with_id("image", "Background", true, None);
+    let open = MenuItem::with_id("open", "Settings...", true, None);
+    let quit = MenuItem::with_id("quit", "Quit", true, None);
+    menu.append_items(&[&enable, &off, &blur, &image]).ok()?;
+    if !settings.presets.is_empty() {
+        menu.append(&PredefinedMenuItem::separator()).ok()?;
+        for (index, preset) in settings.presets.iter().enumerate() {
+            let item = MenuItem::with_id(
+                format!("preset:{index}"),
+                format!("Preset: {}", preset.name),
+                true,
+                None,
+            );
+            menu.append(&item).ok()?;
+        }
+    }
+    menu.append(&PredefinedMenuItem::separator()).ok()?;
+    menu.append(&open).ok()?;
+    menu.append(&quit).ok()?;
+    Some(menu)
+}
 /// A 16x16 filled square, so the tray shows something without shipping an asset.
 fn icon_rgba() -> Vec<u8> {
     let mut rgba = Vec::with_capacity(16 * 16 * 4);
@@ -465,3 +703,5 @@ mod tests {
         assert!(InstanceGuard::acquire_named(&name).is_err());
     }
 }
+
+

@@ -358,6 +358,9 @@ fn install() -> Result<(), String> {
 }
 
 fn uninstall() -> Result<(), String> {
+    if let Err(why) = crate::autostart::set_enabled(false) {
+        println!("launch at login: {why}");
+    }
     if let Err(why) = zagcam_vcam_mgr::remove() {
         println!("session camera: {why}");
     }
