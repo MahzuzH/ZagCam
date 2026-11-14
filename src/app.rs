@@ -19,7 +19,7 @@ pub fn run(model: PathBuf) -> Result<(), String> {
     let engine = Engine::spawn(settings.clone(), model)?;
 
     let tray = Tray::build(&settings);
-    let visible = tray.is_none();
+    let visible = true;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ZagCam")
@@ -197,6 +197,7 @@ impl App {
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("ZagCam");
+        ui.label("Apps see ZagCam Camera; the webcam opens only while an app reads it.");
         ui.add_space(6.0);
 
         ui.horizontal(|ui| {
@@ -393,10 +394,15 @@ struct InstanceGuard(windows_sys::Win32::Foundation::HANDLE);
 #[cfg(windows)]
 impl InstanceGuard {
     fn acquire() -> Result<Self, String> {
+        Self::acquire_named("Local\\ZagCam-SingleInstance")
+    }
+
+    fn acquire_named(name: &str) -> Result<Self, String> {
         use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
         use windows_sys::Win32::System::Threading::CreateMutexW;
 
-        let name: Vec<u16> = "Local\\ZagCam-SingleInstance\0".encode_utf16().collect();
+        let mut name: Vec<u16> = name.encode_utf16().collect();
+        name.push(0);
         let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
         if handle.is_null() {
             return Err(format!(
@@ -435,7 +441,8 @@ mod tests {
 
     #[test]
     fn a_second_instance_is_rejected() {
-        let _first = InstanceGuard::acquire().expect("first instance");
-        assert!(InstanceGuard::acquire().is_err());
+        let name = format!("Local\\ZagCam-Test-{}", std::process::id());
+        let _first = InstanceGuard::acquire_named(&name).expect("first instance");
+        assert!(InstanceGuard::acquire_named(&name).is_err());
     }
 }

@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 code done (manual gates pending); M3 sprints 7–9 code done (manual gates pending).** Capture, background blur, and an own Media Foundation virtual camera are implemented. The engine now publishes blurred frames into that camera (see [Build and usage](#build-and-usage)); compatibility and soak gates remain.
+**Status: M2 and M3 done; M4 (optimization and closed beta) in progress.** Capture, background blur, image replacement, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. M4 is closing the performance and footprint targets before beta.
 
 ## Why
 
@@ -95,9 +95,9 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 
 1. **M0** — Capture prototype: webcam shown in a window via `nokhwa`, baseline CPU/RAM measured. *(done)*
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
-3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(in progress: engine integration done; compatibility and soak gates remain)*
-4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(sprints 7–9 code done, manual gates pending)*
-5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes.
+3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
+4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
+5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(in progress: sprints 10–13)*
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
 7. **M6** — Linux, then **M7** — macOS.
 
@@ -125,7 +125,7 @@ Prefer `--release`: debug builds are an order of magnitude slower.
 needed. It expects a 256x144 RGB input scaled to 0..1 and outputs a person mask; see
 [models/LICENSE](models/LICENSE).
 
-### Own virtual camera (M2/M3, code done, manual gates pending)
+### Own virtual camera (M2/M3, done)
 
 ZagCam has its own Media Foundation virtual camera (no OBS needed). Install the provider once,
 then launch the tray app:
