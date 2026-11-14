@@ -12,6 +12,8 @@ use crate::capture;
 use crate::engine::Engine;
 use crate::settings::{Mode, Quality, Settings, validate_background};
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn run(model: PathBuf) -> Result<(), String> {
     let _instance = InstanceGuard::acquire()?;
     let settings = Settings::load();
@@ -22,7 +24,7 @@ pub fn run(model: PathBuf) -> Result<(), String> {
     let visible = true;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("ZagCam")
+            .with_title(format!("ZagCam {VERSION}"))
             .with_inner_size([440.0, 380.0])
             .with_visible(visible),
         ..Default::default()
@@ -196,7 +198,7 @@ impl App {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ZagCam");
+        ui.heading(format!("ZagCam {VERSION}"));
         ui.label("Apps see ZagCam Camera; the webcam opens only while an app reads it.");
         ui.add_space(6.0);
 

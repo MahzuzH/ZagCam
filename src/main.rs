@@ -39,6 +39,7 @@ Options:
                     output: preview window, OBS virtual camera, or ZagCam camera (default window)
   --model PATH      ONNX segmentation model
   --probe S         run S seconds headless, print fps / RAM / CPU
+  --version, -V     print the version
   --help, -h        show this help
 
 Commands:
@@ -47,6 +48,18 @@ Commands:
 Keys: Esc quits the preview window.";
 
 const DEFAULT_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
+
+fn default_model() -> PathBuf {
+    let relative = PathBuf::from(DEFAULT_MODEL);
+    if relative.exists() {
+        return relative;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(DEFAULT_MODEL)))
+        .filter(|path| path.exists())
+        .unwrap_or(relative)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum SinkKind {
@@ -91,7 +104,7 @@ fn run() -> Result<(), String> {
         return vcam::run(&argv);
     }
     if argv.is_empty() {
-        return app::run(PathBuf::from(DEFAULT_MODEL));
+        return app::run(default_model());
     }
     let args = parse_args(argv)?;
     if args.list {
@@ -170,7 +183,7 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         quality: Quality::Balanced,
         background: None,
         sink: SinkKind::Window,
-        model: PathBuf::from(DEFAULT_MODEL),
+        model: default_model(),
         probe: None,
     };
     let mut raw = argv.into_iter();
@@ -216,6 +229,10 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
                         .parse()
                         .map_err(|_| "bad probe duration".to_string())?,
                 );
+            }
+            "--version" | "-V" => {
+                println!("ZagCam {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
             "--help" | "-h" => {
                 println!("{USAGE}");

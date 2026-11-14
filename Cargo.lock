@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ZagCam"
-version = "0.1.0"
+version = "0.4.0-beta.1"
 dependencies = [
  "eframe",
  "fast_image_resize",

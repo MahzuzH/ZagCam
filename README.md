@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), sprints 12–13 pending.** Capture, background blur, image replacement, quality modes, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. Next is the compatibility matrix, soak, and closed beta.
+**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), Sprint 12 tooling ready, Sprint 13 beta package ready.** Capture, background blur, image replacement, quality modes, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. Next is running the compatibility matrix/soak and the closed beta.
 
 ## Why
 
@@ -98,7 +98,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
-5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 pending)*
+5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 tooling/package ready)*
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
 7. **M6** — Linux, then **M7** — macOS.
 
@@ -150,6 +150,19 @@ releases it after the client stops. Without an engine, the provider shows its te
 `cargo run --release -- --camera N --probe 5` can read the virtual camera back as an input,
 which is a quick end-to-end check. `zagcam vcam feed` still publishes test frames for
 provider-only checks. Provider diagnostics go to `%ProgramData%\ZagCam\vcam-<account>.log`.
+
+### Beta package (M4 sprint 13)
+
+```sh
+powershell -ExecutionPolicy Bypass -File tools\package-beta.ps1
+```
+
+Produces `dist\ZagCam-<version>.zip` (unsigned) with the exe, provider DLL, model, notices,
+quickstart, feedback docs, known issues, and a log collector, plus a SHA-256. The visible beta
+version is `0.4.0-beta.1` (`ZagCam.exe --version`). Install/verify helpers:
+`tools/verify-install.ps1` (package checks, and elevated install/reinstall/uninstall checks),
+`tools/collect-logs.ps1`, `tools/soak.ps1`. Test tracking: `compat/matrix.md`,
+`compat/edge-cases.md`, `beta/tester-tracker.csv`.
 
 ### OBS virtual camera (fallback)
 

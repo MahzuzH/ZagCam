@@ -57,8 +57,8 @@ RAM misses have written exceptions and owners in the Sprint 11 completion notes 
 | --- | --- | --- |
 | 10 — measurement and quality modes | done | repeatable benchmark, budget table, Eco/Balanced/Quality |
 | 11 — performance and footprint | done (2 exceptions) | hit CPU/RAM/latency/size targets or document exceptions |
-| 12 — compatibility and soak | todo | full app matrix, unplug/recovery, 4-hour soak |
-| 13 — closed beta | todo | unsigned beta package, install/uninstall check, tester feedback |
+| 12 — compatibility and soak | tooling ready; manual run pending | full app matrix, unplug/recovery, 4-hour soak |
+| 13 — closed beta | package built; beta pending | unsigned beta package, install/uninstall check, tester feedback |
 
 ### Sprint 10 — measurement and quality modes
 
@@ -191,6 +191,18 @@ Risks:
   Document that as expected behavior unless a fix is cheap.
 - Hardware availability: test with at least one USB webcam and one built-in camera if possible.
 
+Build (2026-11-14):
+
+- Matrix and procedure: `compat/matrix.md`, `compat/edge-cases.md`, `compat/known-issues.md`.
+- Soak monitor: `tools/soak.ps1` (requires a real consumer; writes Markdown + CSV, checks consumer
+  presence, RAM growth, process exit, and new provider-log errors).
+- 1-minute end-to-end smoke passed with the virtual camera read back as a consumer:
+  `compat/soak-smoke.md`.
+- Two simultaneous Source Readers reproduce `0xC00D3704`; needs real-app confirmation before
+  classifying. Repro: `compat/multi-consumer-smoke.md`, tracked as ZC-06.
+- The manual matrix, recovery cases, and 4-hour soak are still pending; this sprint is not done
+  until those rows have results.
+
 ### Sprint 13 — closed beta
 
 Work:
@@ -221,6 +233,19 @@ Risks:
   Document the “More info → Run anyway” step for testers.
 - Beta users may run old Windows builds or unusual cameras; capture build number and camera model.
 - Feedback volume can stall the sprint; timebox triage and keep a written “known issues” list.
+
+Build (2026-11-14):
+
+- Visible beta version: `0.4.0-beta.1` in the title bar and `ZagCam.exe --version`.
+- Package: `tools/package-beta.ps1` produces `dist\ZagCam-<version>.zip` plus a SHA-256 with the
+  exe, provider DLL, model/license, notices, quickstart, feedback docs, known issues, and log
+  collector.
+- Verification: `tools/verify-install.ps1` checks package files and, when elevated, install,
+  reinstall/idempotence, uninstall, registration, and settings preservation.
+- Feedback: `beta/SETUP_SURVEY.md`, `beta/tester-tracker.csv`,
+  `.github/ISSUE_TEMPLATE/beta-report.yml`, and `tools/collect-logs.ps1`.
+- Clean-install verification and tester recruitment are still pending; the beta gate is not met
+  until the tracker has results.
 
 ## M4 exit criteria
 
