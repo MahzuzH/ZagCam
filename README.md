@@ -99,7 +99,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 tooling/package ready)*
-6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
+6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism. *(planned: sprints 14–18)*
 7. **M6** — Linux, then **M7** — macOS.
 
 ## Build and usage

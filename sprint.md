@@ -1,9 +1,10 @@
-# ZagCam sprint plan — M4
+# ZagCam sprint plan — M4/M5
 
 Living plan for the next milestone. M2 and M3 are done (2026-11-14): the virtual camera, tray app,
 settings, image mode, and on-demand lifecycle all work end to end. M4 is optimization and closed
 beta: hit the performance/footprint targets, finish the compatibility matrix and soak, and put a
-beta build in front of real users.
+beta build in front of real users. M4 sprints 10–11 are done with two owned exceptions; sprints
+12–13 have their tooling/package ready. M5 is the v1.0 feature set, planned below.
 
 Conventions for every sprint:
 
@@ -256,10 +257,182 @@ M4 is done when:
 - A beta package is available and the beta success thresholds are met.
 - No open P0/P1 bugs; clippy and tests are green.
 
+## M5 — v1.0 (planned)
+
+M5 turns the beta into v1.0: media backgrounds, presets/hotkeys, live preview, basic adjustments,
+auto-start, and a signed installer with updates. GPU/NPU stays optional and must not block the
+release.
+
+Entry conditions:
+
+- M4 exit is met before release work starts: compatibility matrix/soak complete, no open P0/P1, and
+  the beta thresholds met. Unfinished M4 items get an explicit owner and deferral.
+- ZC-06 (two simultaneous consumers) is confirmed with real apps and fixed or accepted.
+- A code-signing certificate and timestamp service are available for Sprint 17; without them the
+  signed-installer gate is blocked, not quietly skipped.
+
+M5 budgets (same machine/bench as M4):
+
+| Metric | Target |
+| --- | --- |
+| Installer | ≤ 30 MB, signed |
+| Active RAM | ≤ 100 MB |
+| Active CPU | Eco ≤ 32% of one core; GIF/video measured separately |
+| Idle RAM | ≤ 15 MB (fix the `eframe` exception) |
+| Frame rate | never below the source camera rate; no added stalls |
+| Capture-to-output latency | ≤ 100 ms |
+| GIF cache | ≤ 64 MB; oversized GIFs resized or rejected with a clear error |
+| Live preview | ≤ 10% extra CPU while visible; 0% while hidden |
+
+| Sprint | Status | Deliverable |
+| --- | --- | --- |
+| 14 — media backgrounds | todo | looping GIF and video, bounded memory, same mask/composite path |
+| 15 — presets, hotkeys, auto-start | todo | named presets, global hotkeys, opt-in launch at login |
+| 16 — preview, adjustments, idle shell | todo | live preview, mirror/flip, brightness/contrast, ≤15 MB idle |
+| 17 — signed installer and updater | todo | signed package, upgrade path, verified update check |
+| 18 — hardening and optional GPU | todo | M5 soak/matrix, release candidate, GPU/NPU spike only |
+
+### Sprint 14 — media backgrounds
+
+Work:
+
+1. Extend `BackgroundSource` with `Gif` and `Video` variants; keep static image and blur unchanged.
+2. GIF: decode with the `gif`/`image` crates, preserve per-frame delays, loop forever, cap the cache
+   at 64 MB, scale/reject oversized files with a clear error, and never download media.
+3. Video: pick one decoder that fits the size/license budget after a spike; loop, honor the source
+   frame rate, and avoid decoding ahead of the frame clock.
+4. Playback clock lives in the pipeline; a paused/hidden consumer does not decode frames.
+5. Settings/CLI/settings UI accept GIF/video paths with validation; persist in settings v3 with a
+   v2 fallback.
+6. Tests: GIF delay/loop math, cache cap, invalid/corrupt media, settings round-trip/migration.
+
+Gate:
+
+- GIF and looping video show in the virtual camera with correct background compositing.
+- Cache stays ≤ 64 MB; no per-frame allocation in steady state; no crash on corrupt files.
+- Bench: fps follows the camera, latency stays ≤ 100 ms, and active RAM stays ≤ 100 MB.
+- Clippy/tests green.
+
+Risks:
+
+- Video decoder licensing/size; choose before writing the pipeline and document it in
+  `THIRD_PARTY_NOTICES.md`.
+- Long GIFs/high-resolution videos blow the memory budget; reject early instead of degrading.
+
+### Sprint 15 — presets, hotkeys, auto-start
+
+Work:
+
+1. Settings v4: named presets (mode, blur, image/media path, adjustments) and the active preset;
+   migrate v3 with defaults and keep corrupt-field recovery.
+2. Tray menu switches presets in one click; settings UI edits/saves/deletes presets.
+3. Global hotkeys via `RegisterHotKey` (toggle effect, next preset, off); resolve conflicts with a
+   visible error and no silent failure.
+4. Optional launch-at-login: HKCU Run entry only when enabled; remove it on disable/uninstall.
+5. Tests: preset migration/round-trip, invalid preset fallback, hotkey parsing/conflict handling,
+   auto-start registry value formatting.
+
+Gate:
+
+- Preset switch applies live without restarting the consumer.
+- Hotkeys work while a meeting app is focused; conflicts show a clear message.
+- Auto-start is opt-in, survives reboot, and leaves no registry entry after disable/uninstall.
+- Clippy/tests green.
+
+Risks:
+
+- Global hotkeys may collide with games/apps; keep registration best-effort and visible.
+- Presets increase settings schema surface; one migration path and one fallback rule.
+
+### Sprint 16 — preview, adjustments, idle shell
+
+Work:
+
+1. Live preview in the settings window: show the processed frame through a small shared/engine
+   channel, pause when the window is hidden or no consumer is active, and never feed preview frames
+   into the virtual camera path.
+2. Mirror/flip and brightness/contrast: apply in the composite path, persist in settings/presets,
+   and cover both blur and image/media backgrounds.
+3. Fix the idle RAM exception: lazy-create the settings window or replace the `eframe` shell with a
+   native Win32 window, then re-measure idle RAM against ≤ 15 MB.
+4. Keep preview off the hot path: no extra full-frame copies when preview is hidden.
+5. Tests: adjustment math, preset persistence, preview lifecycle, idle measurement with the
+   settings window closed.
+
+Gate:
+
+- Preview is ≤ 10% extra CPU while visible and 0% while hidden; no virtual-camera regression.
+- Mirror/brightness/contrast persist across restart and apply live.
+- Idle RAM ≤ 15 MB with no consumer, or the exception is reopened with new evidence.
+- Clippy/tests green.
+
+Risks:
+
+- Preview can double memory/CPU if it shares no buffers; reuse the pipeline output or send a
+  downscaled copy.
+- A native window is a larger change; only take it if lazy `eframe` cannot reach the RAM target.
+
+### Sprint 17 — signed installer and updater
+
+Work:
+
+1. Build a real installer (MSIX or WiX) that registers the provider, installs the model/media
+   assets, creates shortcuts, and writes an uninstall entry.
+2. Sign the exe, provider DLL, and installer; timestamp every signature. Verify on a clean machine.
+3. Upgrade path: install over the previous version, preserve settings, replace the provider copy,
+   and leave no stale session camera.
+4. Update check: signed manifest/feed, version compare, download to a temp path, verify signature,
+   install only after approval, and roll back on failure.
+5. Uninstall removes the provider, shortcuts, auto-start entry, and installed files; settings stay.
+6. Tests: manifest parsing/version compare, signature-failure rejection, upgrade/uninstall scripted
+   verification, no update without a valid signature.
+
+Gate:
+
+- Installer is signed and verifies on a clean Windows 11 machine.
+- Install, upgrade, and uninstall preserve settings and leave no stale camera/registry entries.
+- Update check rejects tampered packages and never runs without a valid signature.
+- Installer ≤ 30 MB; clippy/tests green.
+
+Risks:
+
+- The certificate/timestamp service may not be available; Sprint 17 is blocked until it is.
+- SmartScreen/antivirus reputation takes time even with a signature; document the first-run path.
+- Updater attack surface; fail closed and do not auto-install.
+
+### Sprint 18 — hardening and optional GPU
+
+Work:
+
+1. Re-run the full compatibility matrix and a 4-hour soak with GIF/video, presets, preview, and
+   auto-start enabled; keep memory flat and no crashes.
+2. Run the upgrade/uninstall matrix again with the signed installer.
+3. GPU/NPU spike only: measure DirectML/WebGPU as an optional path; do not make it a release gate.
+4. Fix only M5 release blockers; defer the rest to M6 with owners.
+5. Update README, changelog, known issues, and the v1.0 release notes.
+
+Gate:
+
+- Full matrix/soak pass, no open P0/P1, signed package installs and updates.
+- Every budget either met or has a written exception and owner.
+- Clippy/tests green; release candidate reproducible from a clean checkout.
+
+Risks:
+
+- GPU/NPU will pull in packaging/driver complexity; keep it opt-in and out of the v1.0 critical path.
+- Release hardening can stall on third-party app updates; record versions and rerun failing rows.
+
+## M5 exit criteria
+
+M5 is done when:
+
+- GIF/video backgrounds, presets/hotkeys, live preview, adjustments, and auto-start work end to end.
+- The signed installer/updater passes clean install, upgrade, uninstall, and signature rejection.
+- The M5 budgets are met or every miss has a written exception and owner.
+- Full compatibility/soak is green and no P0/P1 issues are open.
+
 ## Later milestones (from PRD)
 
-- **M5** — v1.0: GIF/video backgrounds, live preview, presets/hotkeys, mirror/brightness,
-  auto-start, signed installer, updater, GPU/NPU as an optional path.
 - **M6** — Linux (`v4l2loopback`).
 - **M7** — macOS (CoreMediaIO camera extension).
 
