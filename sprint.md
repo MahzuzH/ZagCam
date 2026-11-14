@@ -38,24 +38,25 @@ Conventions for every sprint:
 
 | Metric | Current | M4 target |
 | --- | --- | --- |
-| Installer size | 33.1 MiB exe; 51.0 MiB release binaries + `DirectML.dll` uncompressed | ≤ 30 MB installer |
-| Idle RAM (tray, no consumer) | not measured yet | ≤ 15 MB |
-| Active RAM (blur) | ~55 MiB | ≤ 100 MB |
-| Active CPU (blur) | ~186% of one core | ≤ 32% of one core (8% of 4-core) |
-| Frame rate | ~29 fps | stable 30 fps, never below 24 fps |
-| Capture-to-output latency | not measured yet | ≤ 100 ms |
-| Time to first frame | not measured yet | ≤ 1.5 s after a consumer opens the camera |
-| Idle CPU | near 0% | ~0% with no consumer |
+| Installer size | 34.1 MiB exe; 34.3 MiB release binaries; 11.4 MiB compressed package | ≤ 30 MB installer |
+| Idle RAM (tray, no consumer) | 73.4 MiB (exception) | ≤ 15 MB |
+| Active RAM (blur) | 49.2 MiB eco, 55.6 MiB balanced | ≤ 100 MB |
+| Active CPU (blur) | 17–26% eco, 53–67% balanced, 60–94% quality (1 core) | ≤ 32% of one core (8% of 4-core) |
+| Frame rate | 19.3 fps (camera raw cap ~19; exception) | stable 30 fps, never below 24 fps |
+| Capture-to-output latency | balanced p50 20.0 ms, p95 22.8 ms | ≤ 100 ms |
+| Time to first frame | 224–248 ms | ≤ 1.5 s after a consumer opens the camera |
+| Idle CPU | 0–0.5% | ~0% with no consumer |
 
-The blur CPU number is the hard problem: it is roughly six times the target. M4 must either
-reduce it or produce evidence that the target needs revision before beta.
+Final numbers come from `bench/latest.md`. Eco meets the CPU/RAM targets; the frame-rate and idle
+RAM misses have written exceptions and owners in the Sprint 11 completion notes and
+`bench/README.md`.
 
 ## M4 sprints
 
 | Sprint | Status | Deliverable |
 | --- | --- | --- |
-| 10 — measurement and quality modes | todo | repeatable benchmark, budget table, Eco/Balanced/Quality |
-| 11 — performance and footprint | todo | hit CPU/RAM/latency/size targets or document exceptions |
+| 10 — measurement and quality modes | done | repeatable benchmark, budget table, Eco/Balanced/Quality |
+| 11 — performance and footprint | done (2 exceptions) | hit CPU/RAM/latency/size targets or document exceptions |
 | 12 — compatibility and soak | todo | full app matrix, unplug/recovery, 4-hour soak |
 | 13 — closed beta | todo | unsigned beta package, install/uninstall check, tester feedback |
 
@@ -90,6 +91,16 @@ Risks:
 - Measurement noise from camera auto-exposure and background CPU load; run on AC power, close
   other camera apps, and report the median of three runs.
 - Quality modes multiply the test matrix; keep them as one `Quality` enum, not separate pipelines.
+
+Completion (2026-11-14):
+
+- `tools/bench.ps1` records fps, RAM, CPU, per-stage ms, first frame, capture-to-output p50/p95,
+  artifact sizes, and idle with the settings window closed.
+- Two consecutive runs are within noise (`bench/opt-s-run1.md`/`opt-s-run2.md`,
+  `bench/opt3-run1.md`/`opt3-run2.md`); `bench/latest.md` is the current run and `bench/README.md`
+  holds the budget table.
+- Quality modes persist, switch live from the CLI and settings UI, and v1/invalid settings fall
+  back to balanced. Clippy and tests pass.
 
 ### Sprint 11 — performance and footprint
 
@@ -131,6 +142,19 @@ Risks:
   a clean machine, not just the dev machine.
 - A native Win32 settings window is a larger change than trimming `eframe`; only take it if the
   idle RAM measurement proves it is necessary.
+
+Completion (2026-11-14):
+
+- Met: eco CPU 16.8–26.1%, eco RAM 49.2 MiB, package 11.37 MiB, first frame 224–248 ms,
+  capture-to-output p95 ≤ 50.3 ms, idle CPU 0–0.5%.
+- Exception, frame rate (owner: ZagCam maintainer): the reference camera delivers ~19 fps raw in
+  NV12/MJPEG/YUYV, and off mode is also 19.3 fps. Recheck with a 30 fps camera in Sprint 12.
+- Exception, idle RAM (owner: ZagCam maintainer): 73.4 MiB versus ≤ 15 MiB. Closing the settings
+  window saves under 1 MiB because `eframe`/`glow` owns the cost; lazy-create or a native Win32
+  window is scheduled for M5.
+- Removed the 33 ms engine sleep that capped the consumer path near 20 fps; excluded the unused
+  DirectML DLL from the build/package; kept `opt-level = 3` after the measured tradeoff.
+  Details: `bench/README.md`.
 
 ### Sprint 12 — compatibility and soak
 

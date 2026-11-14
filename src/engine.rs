@@ -19,7 +19,6 @@ use crate::sink::{MfvcamSink, Sink};
 
 const IDLE_RELEASE: Duration = Duration::from_secs(3);
 const CAPTURE_RETRY: Duration = Duration::from_secs(1);
-const POLL_ACTIVE: Duration = Duration::from_millis(33);
 const POLL_IDLE: Duration = Duration::from_millis(50);
 
 pub enum Control {
@@ -181,7 +180,6 @@ fn worker(
                 applied = None;
             }
         }
-        std::thread::sleep(POLL_ACTIVE);
     }
 }
 
@@ -223,11 +221,17 @@ fn fallback_settings(settings: &Settings) -> Option<Settings> {
     })
 }
 
-fn camera_key(settings: &Settings) -> (Option<String>, usize) {
-    (settings.camera_name.clone(), settings.camera_index)
+fn camera_key(settings: &Settings) -> (Option<String>, usize, usize, usize) {
+    let (width, height) = settings.quality.capture_size();
+    (
+        settings.camera_name.clone(),
+        settings.camera_index,
+        width,
+        height,
+    )
 }
 
-fn source_changed(current: &(Option<String>, usize), desired: &Settings) -> bool {
+fn source_changed(current: &(Option<String>, usize, usize, usize), desired: &Settings) -> bool {
     *current != camera_key(desired)
 }
 
@@ -240,7 +244,7 @@ struct Session {
     rgb: Vec<u8>,
     pipeline: Option<Pipeline>,
     model: PathBuf,
-    key: (Option<String>, usize),
+    key: (Option<String>, usize, usize, usize),
     width: usize,
     height: usize,
     last_active: Instant,
@@ -253,7 +257,8 @@ impl Session {
             .camera_index(&cameras)
             .ok_or_else(|| format!("camera {} not found", settings.camera_index))?;
         let source = cameras[position].index().clone();
-        let camera = capture::open(&source)?;
+        let (max_w, max_h) = settings.quality.capture_size();
+        let camera = capture::open(&source, max_w, max_h)?;
         let format = camera.camera_format();
         let (width, height) = (format.width() as usize, format.height() as usize);
         let pipeline = Pipeline::build(
@@ -263,6 +268,7 @@ impl Session {
             height,
             settings.blur,
             settings.background.as_deref(),
+            settings.quality,
         )?;
         Ok(Self {
             camera,
@@ -289,6 +295,7 @@ impl Session {
                         self.height,
                         settings.blur,
                         None,
+                        settings.quality,
                     )?;
                 }
             },
@@ -308,9 +315,13 @@ impl Session {
                         self.height,
                         settings.blur,
                         settings.background.as_deref(),
+                        settings.quality,
                     )?;
                 }
             },
+        }
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            pipeline.set_quality(settings.quality);
         }
         Ok(())
     }
@@ -348,17 +359,22 @@ mod tests {
 
     #[test]
     fn changing_the_source_camera_requests_a_reopen() {
-        let key = (Some("Cam A".to_string()), 0);
         let same = Settings {
             camera_name: Some("Cam A".to_string()),
             ..Settings::default()
         };
+        let key = super::camera_key(&same);
         let other = Settings {
             camera_name: Some("Cam B".to_string()),
             ..Settings::default()
         };
+        let eco = Settings {
+            quality: crate::settings::Quality::Eco,
+            ..Settings::default()
+        };
         assert!(!source_changed(&key, &same));
         assert!(source_changed(&key, &other));
+        assert!(source_changed(&key, &eco));
     }
 
     #[test]

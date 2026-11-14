@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::segmenter::{Segmenter, IN_H, IN_W};
-use crate::settings::{Mode, validate_background};
+use crate::settings::{Mode, Quality, validate_background};
 
 const EMA_ALPHA: u32 = 102; // 0.4 in 0..255
 
@@ -47,6 +47,8 @@ pub struct Pipeline {
     out: Vec<u8>,
     frame: u64,
     mask_w: usize,
+    mask_div: usize,
+    quality: Quality,
     pub timings: Timings,
     pub samples: u64,
 }
@@ -57,11 +59,16 @@ impl Pipeline {
         width: usize,
         height: usize,
         blur: u8,
+        quality: Quality,
     ) -> Result<Self, String> {
         let div = blur_div(blur);
         let (bw, bh) = ((width / div).max(1) as u32, (height / div).max(1) as u32);
         let pixels = width * height;
-        let (mask_w, mask_h) = ((width / 2).max(1), (height / 2).max(1));
+        let mask_div = quality.mask_div();
+        let (mask_w, mask_h) = (
+            width.div_ceil(mask_div).max(1),
+            height.div_ceil(mask_div).max(1),
+        );
         Ok(Self {
             width,
             height,
@@ -81,6 +88,8 @@ impl Pipeline {
             out: vec![0u8; pixels * 3],
             frame: 0,
             mask_w,
+            mask_div,
+            quality,
             timings: Timings::default(),
             samples: 0,
         })
@@ -94,6 +103,7 @@ impl Pipeline {
         height: usize,
         blur: u8,
         background: Option<&Path>,
+        quality: Quality,
     ) -> Result<Option<Self>, String> {
         match mode {
             Mode::Off => Ok(None),
@@ -102,10 +112,12 @@ impl Pipeline {
                 width,
                 height,
                 blur,
+                quality,
             )?)),
             Mode::Image => {
                 let path = background.ok_or("image mode needs a background image (--background PATH)")?;
-                let mut pipeline = Self::new(Segmenter::load(model)?, width, height, blur)?;
+                let mut pipeline =
+                    Self::new(Segmenter::load(model)?, width, height, blur, quality)?;
                 pipeline.configure(BackgroundSource::Image(path))?;
                 Ok(Some(pipeline))
             }
@@ -125,6 +137,22 @@ impl Pipeline {
                 self.background = Background::Image(image);
                 Ok(())
             }
+        }
+    }
+
+    /// Changes inference cadence and mask resolution. The next frame uses the new quality.
+    pub fn set_quality(&mut self, quality: Quality) {
+        if quality == self.quality {
+            return;
+        }
+        self.quality = quality;
+        let div = quality.mask_div();
+        if div != self.mask_div {
+            self.mask_div = div;
+            self.mask_w = self.width.div_ceil(div).max(1);
+            let mask_h = self.height.div_ceil(div).max(1);
+            self.mask_half = Image::new(self.mask_w as u32, mask_h as u32, PixelType::U8);
+            self.ema = vec![255u8; self.mask_w * mask_h];
         }
     }
 
@@ -154,7 +182,7 @@ impl Pipeline {
         }
         self.timings.preprocess += t.elapsed();
 
-        if self.frame.is_multiple_of(2) {
+        if self.frame.is_multiple_of(self.quality.infer_every()) {
             t = Instant::now();
             self.segmenter.infer(&self.input, &mut self.mask_f32)?;
             self.timings.infer += t.elapsed();
@@ -176,7 +204,17 @@ impl Pipeline {
 
         if matches!(self.background, Background::Blur) {
             t = Instant::now();
-            let src = ImageRef::new(w, h, rgb, PixelType::U8x3).map_err(resize_err)?;
+            let src = if self.quality == Quality::High {
+                ImageRef::new(w, h, rgb, PixelType::U8x3).map_err(resize_err)?
+            } else {
+                ImageRef::new(
+                    IN_W as u32,
+                    IN_H as u32,
+                    self.small_rgb.buffer(),
+                    PixelType::U8x3,
+                )
+                .map_err(resize_err)?
+            };
             self.resizer
                 .resize(&src, &mut self.blur_small, &self.opts_down)
                 .map_err(resize_err)?;
@@ -191,7 +229,15 @@ impl Pipeline {
             Background::Blur => self.blur_full.buffer(),
             Background::Image(image) => image.buffer(),
         };
-        blend_rgb(rgb, background, &self.ema, self.mask_w, &mut self.out);
+        blend_rgb(
+            rgb,
+            background,
+            &self.ema,
+            self.mask_w,
+            self.mask_div,
+            self.width,
+            &mut self.out,
+        );
         self.timings.composite += t.elapsed();
         self.samples += 1;
         Ok(&self.out)
@@ -236,24 +282,35 @@ pub fn ema_u8(prev: &mut [u8], cur: &[u8], alpha: u32) {
     }
 }
 
-/// `out = fg*m + bg*(1-m)`. `mask` is a half-resolution mask in 0..=255,
-/// `mask_w` its width; each mask pixel covers a 2x2 block of the frame.
-pub fn blend_rgb(fg: &[u8], bg: &[u8], mask: &[u8], mask_w: usize, out: &mut [u8]) {
+/// `out = fg*m + bg*(1-m)`. `mask` is in 0..=255 with width `mask_w`; each mask pixel
+/// covers a `mask_div` x `mask_div` block of the `width`-pixel-wide frame.
+pub fn blend_rgb(
+    fg: &[u8],
+    bg: &[u8],
+    mask: &[u8],
+    mask_w: usize,
+    mask_div: usize,
+    width: usize,
+    out: &mut [u8],
+) {
     use rayon::prelude::*;
 
-    let width = mask_w * 2;
     let row = width * 3;
     out.par_chunks_mut(row).enumerate().for_each(|(y, out_row)| {
-        let mask_row = &mask[(y / 2) * mask_w..(y / 2 + 1) * mask_w];
+        let mask_row = &mask[(y / mask_div) * mask_w..(y / mask_div + 1) * mask_w];
         let fg_row = &fg[y * row..(y + 1) * row];
         let bg_row = &bg[y * row..(y + 1) * row];
-        for x in 0..width {
-            let m = u32::from(mask_row[x / 2]);
+        for (block, &mask_value) in mask_row.iter().enumerate() {
+            let m = u32::from(mask_value);
             let keep = 255 - m;
-            let idx = x * 3;
-            for c in 0..3 {
-                let v = u32::from(fg_row[idx + c]) * m + u32::from(bg_row[idx + c]) * keep;
-                out_row[idx + c] = ((v + 1 + (v >> 8)) >> 8) as u8;
+            let start = block * mask_div;
+            let end = (start + mask_div).min(width);
+            for x in start..end {
+                let idx = x * 3;
+                for c in 0..3 {
+                    let v = u32::from(fg_row[idx + c]) * m + u32::from(bg_row[idx + c]) * keep;
+                    out_row[idx + c] = ((v + 1 + (v >> 8)) >> 8) as u8;
+                }
             }
         }
     });
@@ -300,11 +357,24 @@ mod tests {
         let bg = [200, 210, 220, 230, 240, 250];
         let mut out = [0u8; 6];
 
-        blend_rgb(&fg, &bg, &[255], 1, &mut out);
+        blend_rgb(&fg, &bg, &[255], 1, 2, 2, &mut out);
         assert_eq!(out, fg);
 
-        blend_rgb(&fg, &bg, &[0], 1, &mut out);
+        blend_rgb(&fg, &bg, &[0], 1, 2, 2, &mut out);
         assert_eq!(out, bg);
+    }
+
+    #[test]
+    fn blend_handles_quarter_resolution_masks() {
+        let fg = [10u8; 6 * 4 * 3];
+        let bg = [200u8; 6 * 4 * 3];
+        let mut out = [0u8; 6 * 4 * 3];
+
+        blend_rgb(&fg, &bg, &[255, 0], 2, 4, 6, &mut out);
+        for row in out.chunks(18) {
+            assert!(row[..12].iter().all(|&value| value == 10));
+            assert!(row[12..].iter().all(|&value| value == 200));
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 and M3 done; M4 (optimization and closed beta) in progress.** Capture, background blur, image replacement, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. M4 is closing the performance and footprint targets before beta.
+**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), sprints 12–13 pending.** Capture, background blur, image replacement, quality modes, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it. Next is the compatibility matrix, soak, and closed beta.
 
 ## Why
 
@@ -21,13 +21,13 @@ Lightweight virtual camera that blurs or replaces your webcam background. Pick "
 - One virtual camera visible to Chrome, Edge, Discord, Teams.
 - Tray app with quick toggle and a simple settings window.
 - Physical camera opened only while the virtual camera is in use.
+- Quality modes (Eco / Balanced / Quality) controlling inference rate and resolution.
 
 **v1.0**
 
 - GIF and looping video backgrounds.
 - Presets and global hotkeys.
 - Live preview in settings.
-- Quality modes (Eco / Balanced / Quality) controlling inference rate and resolution.
 - Mirror/flip, basic brightness and contrast.
 - Optional start with the OS.
 - Digitally signed installer and update mechanism.
@@ -52,7 +52,8 @@ Performance strategy: infer at low resolution, run the model every 2 frames and 
 
 ## Performance targets
 
-Design estimates, to be validated by measurement in the prototype.
+Measured on the reference laptop with `tools/bench.ps1`; current numbers and the two documented
+exceptions are in [`bench/README.md`](bench/README.md).
 
 | Metric | Target |
 | --- | --- |
@@ -89,7 +90,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 - **GIF decoding:** `gif` / `image`, frames kept at native GIF resolution
 - **Windows API:** `windows` crate, `MFCreateVirtualCamera`
 - **UI:** tray app with `eframe`/`egui`, tray menu with `tray-icon`
-- **Build:** `opt-level = "s"`, LTO, `codegen-units = 1`, `strip = true`
+- **Build:** `opt-level = 3`, LTO, `codegen-units = 1`, `strip = true`
 
 ## Roadmap
 
@@ -97,7 +98,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 2. **M1** — Background blur: `ort` + MediaPipe, smoothed mask, output to OBS Virtual Camera for validation. *(done)*
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
-5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(in progress: sprints 10–13)*
+5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 pending)*
 6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism.
 7. **M6** — Linux, then **M7** — macOS.
 
@@ -159,15 +160,22 @@ feature `sink-vcam` is off by default.
 
 ### Baselines (reference laptop, 1280x720 NV12, release)
 
-| Mode | fps | Working set | CPU (1 core = 100%) |
-| --- | --- | --- | --- |
-| off (capture only) | ~29 | ~19 MiB | ~33% |
-| blur | ~29 | ~55 MiB | ~186% (~1.9 cores) |
+Latest `tools/bench.ps1` run; see [`bench/latest.md`](bench/latest.md) and
+[`bench/README.md`](bench/README.md) for targets and exceptions.
 
-Blur per frame: preprocess ~1.7 ms, inference ~4 ms (every 2nd frame), mask ~1.9 ms, blur ~3.5 ms,
-composite ~1.9 ms. Resizing and compositing use `rayon`, so the blur path uses about two cores to
-keep 30 fps. The CPU budget in the PRD (~8% of a 4-core laptop) is **not** met yet; capture/decode
-and the CPU-only model are the main costs, and reducing them is M4 work.
+| Mode | fps | Working set | CPU (1 core = 100%) | Latency p50 / p95 |
+| --- | --- | --- | --- | --- |
+| off | 19.3 | 20.6 MiB | 18% | 5.8 / 6.7 ms |
+| blur, eco | 19.3 | 49.2 MiB | 17% | 4.9 / 12.7 ms |
+| blur, balanced | 19.3 | 55.6 MiB | 53% | 20.0 / 22.8 ms |
+| blur, quality | 19.2 | 55.0 MiB | 60% | 21.6 / 24.0 ms |
+| image, balanced | 19.3 | 55.6 MiB | 46% | 17.5 / 19.5 ms |
+
+First frame is 224–248 ms and the compressed package is 11.37 MiB. Eco meets the active CPU and
+RAM budgets; balanced and quality trade CPU for quality and are documented. The reference camera
+delivers ~19 fps raw, so the 30 fps floor is an exception until Sprint 12 tests a 30 fps camera.
+Idle tray RAM is 73.4 MiB against the 15 MiB target; `eframe` owns that cost, and the lazy/native
+settings window is scheduled for M5.
 
 Media Foundation reports a bogus 1 fps in the media type, so trust the measured fps, not the
 printed format line.

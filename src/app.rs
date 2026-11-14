@@ -10,7 +10,7 @@ use zagcam_vcam_mgr::VirtualCamera;
 
 use crate::capture;
 use crate::engine::Engine;
-use crate::settings::{Mode, Settings, validate_background};
+use crate::settings::{Mode, Quality, Settings, validate_background};
 
 pub fn run(model: PathBuf) -> Result<(), String> {
     let _instance = InstanceGuard::acquire()?;
@@ -232,6 +232,22 @@ impl App {
             }
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Quality");
+            for (quality, label) in [
+                (Quality::Eco, "Eco"),
+                (Quality::Balanced, "Balanced"),
+                (Quality::High, "Quality"),
+            ] {
+                if ui
+                    .selectable_value(&mut self.draft.quality, quality, label)
+                    .clicked()
+                {
+                    self.message = None;
+                }
+            }
+        });
+
         let blur = ui.add_enabled(
             self.draft.mode == Mode::Blur,
             egui::Slider::new(&mut self.draft.blur, 0..=100).text("Blur intensity"),
@@ -308,7 +324,8 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.window_visible = false;
         }
-        ctx.request_repaint_after(Duration::from_millis(150));
+        let interval = if self.window_visible { 150 } else { 1_000 };
+        ctx.request_repaint_after(Duration::from_millis(interval));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

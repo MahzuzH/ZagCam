@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use pipeline::Pipeline;
-use settings::Mode;
+use settings::{Mode, Quality};
 use sink::{Sink, WindowSink};
 
 const USAGE: &str = "ZagCam - lightweight virtual camera
@@ -32,6 +32,8 @@ Options:
   --mode off|blur|image
                     effect (default off)
   --blur 0..100     blur intensity (default 50)
+  --quality eco|balanced|quality
+                    inference cadence and mask resolution (default balanced)
   --background PATH background image for --mode image
   --sink window|vcam|mfvcam
                     output: preview window, OBS virtual camera, or ZagCam camera (default window)
@@ -58,6 +60,7 @@ struct Args {
     camera: Option<usize>,
     mode: Mode,
     blur: u8,
+    quality: Quality,
     background: Option<PathBuf>,
     sink: SinkKind,
     model: PathBuf,
@@ -65,6 +68,13 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    let threads = std::env::var("ZAGCAM_THREADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
@@ -119,7 +129,8 @@ fn run() -> Result<(), String> {
         return run_mfvcam(&args, source.index().clone());
     }
 
-    let mut camera = capture::open(source.index())?;
+    let (capture_w, capture_h) = args.quality.capture_size();
+    let mut camera = capture::open(source.index(), capture_w, capture_h)?;
     let format = camera.camera_format();
     let (sw, sh) = (format.width() as usize, format.height() as usize);
     println!(
@@ -139,6 +150,7 @@ fn run() -> Result<(), String> {
         sh,
         args.blur,
         args.background.as_deref(),
+        args.quality,
     )?;
 
     if let Some(secs) = args.probe {
@@ -155,6 +167,7 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
         camera: None,
         mode: Mode::Off,
         blur: 50,
+        quality: Quality::Balanced,
         background: None,
         sink: SinkKind::Window,
         model: PathBuf::from(DEFAULT_MODEL),
@@ -181,6 +194,11 @@ fn parse_args(argv: Vec<String>) -> Result<Args, String> {
                 args.blur = value()?
                     .parse()
                     .map_err(|_| "bad blur intensity".to_string())?;
+            }
+            "--quality" => {
+                let raw = value()?;
+                args.quality = Quality::parse(&raw)
+                    .ok_or_else(|| format!("unknown quality {raw}"))?;
             }
             "--background" => args.background = Some(PathBuf::from(value()?)),
             "--sink" => {
@@ -244,7 +262,8 @@ struct CaptureSession {
 
 impl CaptureSession {
     fn open(index: &CameraIndex, args: &Args) -> Result<Self, String> {
-        let camera = capture::open(index)?;
+        let (max_w, max_h) = args.quality.capture_size();
+        let camera = capture::open(index, max_w, max_h)?;
         let format = camera.camera_format();
         let (width, height) = (format.width() as usize, format.height() as usize);
         let pipeline = Pipeline::build(
@@ -254,6 +273,7 @@ impl CaptureSession {
             height,
             args.blur,
             args.background.as_deref(),
+            args.quality,
         )?;
         println!("camera opened: {width}x{height}");
         Ok(Self {
@@ -372,12 +392,19 @@ fn probe(
     let mut sampler = stats::Sampler::new();
     let start = Instant::now();
     let mut frames: u64 = 0;
+    let mut first_frame = None;
+    let mut latencies = Vec::new();
     while start.elapsed().as_secs_f64() < secs {
-        next_frame(camera, rgb)?;
+        let decode = next_frame(camera, rgb)?;
+        let effect_start = Instant::now();
         if let Some(pipeline) = pipeline.as_deref_mut() {
             pipeline.process(rgb)?;
         }
+        latencies.push(decode + effect_start.elapsed());
         frames += 1;
+        if first_frame.is_none() {
+            first_frame = Some(start.elapsed());
+        }
     }
     let elapsed = start.elapsed().as_secs_f64();
     let snap = sampler.snapshot();
@@ -388,13 +415,21 @@ fn probe(
         snap.working_set as f64 / 1_048_576.0,
         snap.cpu_percent
     );
+    latencies.sort_unstable();
+    println!(
+        "  first frame {:.0} ms | average interval {:.2} ms | capture-to-output p50 {:.1} ms | p95 {:.1} ms",
+        first_frame.unwrap_or_default().as_secs_f64() * 1000.0,
+        elapsed * 1000.0 / frames.max(1) as f64,
+        percentile(&latencies, 50),
+        percentile(&latencies, 95)
+    );
     if let Some(pipeline) = pipeline.as_deref()
         && pipeline.samples > 0
     {
         let n = pipeline.samples as f64;
         let t = pipeline.timings;
         println!(
-            "  per frame: preprocess {:.2} ms | infer/every-2 {:.2} ms | mask {:.2} ms | blur {:.2} ms | composite {:.2} ms",
+            "  per frame: preprocess {:.2} ms | infer {:.2} ms | mask {:.2} ms | blur {:.2} ms | composite {:.2} ms",
             t.preprocess.as_secs_f64() * 1000.0 / n,
             t.infer.as_secs_f64() * 1000.0 / n,
             t.mask.as_secs_f64() * 1000.0 / n,
@@ -405,11 +440,45 @@ fn probe(
     Ok(())
 }
 
-fn next_frame(camera: &mut Camera, rgb: &mut [u8]) -> Result<(), String> {
+fn next_frame(camera: &mut Camera, rgb: &mut [u8]) -> Result<Duration, String> {
     let frame = camera
         .frame()
         .map_err(|why| format!("capture failed: {why}"))?;
+    let decode_start = Instant::now();
     frame
         .decode_image_to_buffer::<RgbFormat>(rgb)
-        .map_err(|why| format!("decode failed: {why}"))
+        .map_err(|why| format!("decode failed: {why}"))?;
+    Ok(decode_start.elapsed())
+}
+
+fn percentile(sorted: &[Duration], percent: usize) -> f64 {
+    let index = (sorted.len() * percent / 100).min(sorted.len().saturating_sub(1));
+    sorted
+        .get(index)
+        .map_or(0.0, |value| value.as_secs_f64() * 1000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Quality, parse_args, percentile};
+    use std::time::Duration;
+
+    #[test]
+    fn quality_flag_parses() {
+        let args = parse_args(vec!["--quality".to_string(), "eco".to_string()]).expect("parse");
+        assert_eq!(args.quality, Quality::Eco);
+    }
+
+    #[test]
+    fn unknown_quality_is_rejected() {
+        assert!(parse_args(vec!["--quality".to_string(), "ultra".to_string()]).is_err());
+    }
+
+    #[test]
+    fn latency_percentiles_handle_empty_and_tail() {
+        assert_eq!(percentile(&[], 95), 0.0);
+        let samples: Vec<Duration> = (1..=4).map(Duration::from_millis).collect();
+        assert_eq!(percentile(&samples, 50), 3.0);
+        assert_eq!(percentile(&samples, 95), 4.0);
+    }
 }

@@ -8,9 +8,9 @@ pub fn list() -> Result<Vec<CameraInfo>, String> {
     query(ApiBackend::Auto).map_err(|why| format!("camera query failed: {why}"))
 }
 
-pub fn open(index: &CameraIndex) -> Result<Camera, String> {
-    let w = MAX_W as u32;
-    let h = MAX_H as u32;
+pub fn open(index: &CameraIndex, max_w: usize, max_h: usize) -> Result<Camera, String> {
+    let w = max_w as u32;
+    let h = max_h as u32;
     let attempts = [
         CameraFormat::new_from(w, h, FrameFormat::NV12, 30),
         CameraFormat::new_from(w, h, FrameFormat::MJPEG, 30),

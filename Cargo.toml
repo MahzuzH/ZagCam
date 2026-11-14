@@ -14,7 +14,15 @@ sink-vcam = ["dep:virtualcam"]
 [dependencies]
 minifb = "0.29"
 nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"] }
-ort = "2.0.0-rc.15"
+# No copy-dylibs: the Windows prebuilt is the DirectML build, but this app only uses the CPU EP,
+# so the 17.7 MiB DirectML.dll is not needed at runtime or in the package.
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "tls-native",
+] }
 fast_image_resize = { version = "6", features = ["rayon"] }
 rayon = "1"
 sha2 = "0.10"
@@ -40,7 +48,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = true

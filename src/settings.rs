@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const DEFAULT_BLUR: u8 = 50;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,58 @@ impl Mode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Quality {
+    Eco,
+    #[default]
+    Balanced,
+    High,
+}
+
+impl Quality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eco => "eco",
+            Self::Balanced => "balanced",
+            Self::High => "quality",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "eco" => Some(Self::Eco),
+            "balanced" => Some(Self::Balanced),
+            "quality" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    /// Run the model every N frames.
+    pub fn infer_every(self) -> u64 {
+        match self {
+            Self::Eco => 4,
+            Self::Balanced => 2,
+            Self::High => 1,
+        }
+    }
+
+    /// Each mask pixel covers a `mask_div` x `mask_div` block of the frame.
+    pub fn mask_div(self) -> usize {
+        match self {
+            Self::Eco => 4,
+            Self::Balanced | Self::High => 2,
+        }
+    }
+
+    /// Requested capture size. Eco trades resolution for CPU; output is still scaled to 720p.
+    pub fn capture_size(self) -> (usize, usize) {
+        match self {
+            Self::Eco => (640, 360),
+            Self::Balanced | Self::High => (1280, 720),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub version: u32,
@@ -40,6 +92,7 @@ pub struct Settings {
     pub mode: Mode,
     pub blur: u8,
     pub background: Option<PathBuf>,
+    pub quality: Quality,
 }
 
 impl Default for Settings {
@@ -51,6 +104,7 @@ impl Default for Settings {
             mode: Mode::Off,
             blur: DEFAULT_BLUR,
             background: None,
+            quality: Quality::default(),
         }
     }
 }
@@ -120,6 +174,7 @@ impl Settings {
             "mode": self.mode.as_str(),
             "blur": self.blur,
             "background": background,
+            "quality": self.quality.as_str(),
         })
         .to_string()
     }
@@ -136,7 +191,7 @@ impl Settings {
 
         if let Some(value) = map.get("version") {
             match value.as_u64() {
-                Some(version) if version == u64::from(VERSION) => settings.version = VERSION,
+                Some(1 | 2) => settings.version = VERSION,
                 _ => problem = true,
             }
         }
@@ -174,6 +229,12 @@ impl Settings {
                     settings.background = Some(PathBuf::from(path));
                 }
                 _ => problem = true,
+            }
+        }
+        if let Some(value) = map.get("quality") {
+            match value.as_str().and_then(Quality::parse) {
+                Some(quality) => settings.quality = quality,
+                None => problem = true,
             }
         }
 
@@ -228,28 +289,30 @@ pub fn validate_background(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, Settings};
+    use super::{Mode, Quality, Settings, VERSION};
     use std::path::PathBuf;
 
     #[test]
     fn defaults_are_off_with_no_background() {
         let settings = Settings::default();
-        assert_eq!(settings.version, 1);
+        assert_eq!(settings.version, VERSION);
         assert_eq!(settings.camera_index, 0);
         assert_eq!(settings.mode, Mode::Off);
         assert_eq!(settings.blur, 50);
         assert_eq!(settings.background, None);
+        assert_eq!(settings.quality, Quality::Balanced);
     }
 
     #[test]
     fn round_trip_keeps_every_field() {
         let settings = Settings {
-            version: 1,
+            version: VERSION,
             camera_name: Some("HD Webcam".to_string()),
             camera_index: 2,
             mode: Mode::Image,
             blur: 70,
             background: Some(PathBuf::from(r"C:\Pictures\bg.png")),
+            quality: Quality::High,
         };
         let parsed = Settings::parse(&settings.to_json());
         assert_eq!(parsed.settings, settings);
@@ -265,11 +328,35 @@ mod tests {
 
     #[test]
     fn out_of_range_blur_and_unknown_version_use_defaults() {
-        let parsed = Settings::parse(r#"{"version":2,"blur":101,"mode":"blur"}"#);
-        assert_eq!(parsed.settings.version, 1);
+        let parsed = Settings::parse(r#"{"version":99,"blur":101,"mode":"blur"}"#);
+        assert_eq!(parsed.settings.version, VERSION);
         assert_eq!(parsed.settings.blur, 50);
         assert_eq!(parsed.settings.mode, Mode::Blur);
         assert!(parsed.problem.is_some());
+    }
+
+    #[test]
+    fn v1_settings_get_balanced_quality() {
+        let parsed = Settings::parse(r#"{"version":1,"mode":"blur","blur":60}"#);
+        assert_eq!(parsed.settings.version, VERSION);
+        assert_eq!(parsed.settings.mode, Mode::Blur);
+        assert_eq!(parsed.settings.quality, Quality::Balanced);
+        assert!(parsed.problem.is_none());
+    }
+
+    #[test]
+    fn invalid_quality_falls_back_to_balanced() {
+        let parsed = Settings::parse(r#"{"version":2,"quality":"ultra"}"#);
+        assert_eq!(parsed.settings.quality, Quality::Balanced);
+        assert!(parsed.problem.is_some());
+    }
+
+    #[test]
+    fn quality_budgets_are_ordered() {
+        assert!(Quality::Eco.infer_every() > Quality::Balanced.infer_every());
+        assert!(Quality::Balanced.infer_every() > Quality::High.infer_every());
+        assert!(Quality::Eco.mask_div() > Quality::Balanced.mask_div());
+        assert!(Quality::Eco.capture_size().0 < Quality::Balanced.capture_size().0);
     }
 
     #[test]
