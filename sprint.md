@@ -4,7 +4,8 @@ Living plan for the next milestone. M2 and M3 are done (2026-11-14): the virtual
 settings, image mode, and on-demand lifecycle all work end to end. M4 is optimization and closed
 beta: hit the performance/footprint targets, finish the compatibility matrix and soak, and put a
 beta build in front of real users. M4 sprints 10–11 are done with two owned exceptions; sprints
-12–13 have their tooling/package ready. M5 is the v1.0 feature set, planned below.
+12–13 have their tooling/package ready. M5 sprints 14–17 are implemented (unsigned-installer
+exception); Sprint 18 remains.
 
 Conventions for every sprint:
 
@@ -289,7 +290,7 @@ M5 budgets (same machine/bench as M4):
 | 14 — media backgrounds | todo | looping GIF and video, bounded memory, same mask/composite path |
 | 15 — presets, hotkeys, auto-start | todo | named presets, global hotkeys, opt-in launch at login |
 | 16 — preview, adjustments, idle shell | todo | live preview, mirror/flip, brightness/contrast, ≤15 MB idle |
-| 17 — signed installer and updater | todo | signed package, upgrade path, verified update check |
+| 17 — signed installer and updater | done (unsigned exception) | MSI package, upgrade path, verified update check; Authenticode signing deferred |
 | 18 — hardening and optional GPU | todo | M5 soak/matrix, release candidate, GPU/NPU spike only |
 
 ### Sprint 14 — media backgrounds
@@ -430,6 +431,22 @@ Risks:
 - The certificate/timestamp service may not be available; Sprint 17 is blocked until it is.
 - SmartScreen/antivirus reputation takes time even with a signature; document the first-run path.
 - Updater attack surface; fail closed and do not auto-install.
+
+Completion (2026-11-16):
+
+- WiX per-machine MSI installs the exe, provider DLL, model, notices, shortcuts, and CLSID
+  registration; settings stay in `%APPDATA%\ZagCam`. `tools\build-installer.ps1` produces
+  `dist\ZagCam-<version>.msi` (9 MB class).
+- Update feed checks `latest.json`, verifies an Ed25519 signature over the exact manifest bytes,
+  compares semver, downloads to `%TEMP%\ZagCam\updates`, verifies SHA-256, and installs only after
+  tray approval. `tools\verify-update.ps1` covers valid/tampered manifests and signatures.
+- Tray menu has **Check for updates...**; the app exits and releases the session camera before
+  launching `msiexec` elevated.
+- `tools\release.ps1` writes `dist\release\v<version>\` with the MSI, `latest.json`,
+  `latest.json.sig`, and `SHA256SUMS` for a GitHub release.
+- Signing exception: the MSI and executables are **not Authenticode-signed**. SmartScreen shows
+  Unknown publisher and the first-run path is documented in `beta\QUICKSTART.md`. The signed
+  installer gate remains open; no certificate is available yet.
 
 ### Sprint 18 — hardening and optional GPU
 

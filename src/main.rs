@@ -9,6 +9,7 @@ mod segmenter;
 mod settings;
 mod sink;
 mod stats;
+mod update;
 mod vcam;
 mod video;
 
@@ -51,6 +52,7 @@ Options:
 
 Commands:
   vcam <cmd>        manage the virtual camera (start, stop, status, install, uninstall)
+  update check      check the signed release feed for a newer version
 
 Keys: Esc quits the preview window.";
 
@@ -113,6 +115,10 @@ fn run() -> Result<(), String> {
     if argv.first().map(String::as_str) == Some("vcam") {
         argv.remove(0);
         return vcam::run(&argv);
+    }
+    if argv.first().map(String::as_str) == Some("update") {
+        argv.remove(0);
+        return update::run(&argv);
     }
     if argv.is_empty() {
         return app::run(default_model());

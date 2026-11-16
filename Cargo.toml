@@ -5,7 +5,13 @@ edition = "2024"
 
 [workspace]
 resolver = "2"
-members = [".", "crates/zagcam-vcam-shared", "crates/zagcam-vcam", "crates/zagcam-vcam-mgr"]
+members = [
+    ".",
+    "crates/zagcam-vcam-shared",
+    "crates/zagcam-vcam",
+    "crates/zagcam-vcam-mgr",
+    "tools/sign-manifest",
+]
 
 [features]
 default = []
@@ -26,6 +32,10 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = [
 fast_image_resize = { version = "6", features = ["rayon"] }
 rayon = "1"
 sha2 = "0.10"
+hex = "0.4"
+semver = "1"
+ureq = "3"
+ed25519-dalek = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "rayon"] }
 serde_json = "1"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow"] }

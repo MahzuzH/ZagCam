@@ -436,6 +436,13 @@ fn is_elevated() -> bool {
 
 #[cfg(windows)]
 fn elevate(command: &str) -> Result<(), String> {
+    let exe =
+        std::env::current_exe().map_err(|why| format!("cannot find this executable: {why}"))?;
+    run_elevated(&exe, &format!("vcam {command}"))
+}
+
+#[cfg(windows)]
+pub(crate) fn run_elevated(exe: &Path, params: &str) -> Result<(), String> {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::System::Threading::{
@@ -446,15 +453,13 @@ fn elevate(command: &str) -> Result<(), String> {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    let exe =
-        std::env::current_exe().map_err(|why| format!("cannot find this executable: {why}"))?;
     let exe = exe
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect::<Vec<_>>();
     let verb = "runas".encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let params = format!("vcam {command}")
+    let params = params
         .encode_utf16()
         .chain(Some(0))
         .collect::<Vec<_>>();
@@ -481,9 +486,7 @@ fn elevate(command: &str) -> Result<(), String> {
         if code == 0 {
             Ok(())
         } else {
-            Err(format!(
-                "elevated `vcam {command}` failed with exit code {code}"
-            ))
+            Err(format!("elevated command failed with exit code {code}"))
         }
     }
 }
@@ -491,4 +494,9 @@ fn elevate(command: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 fn elevate(_command: &str) -> Result<(), String> {
     Err("virtual camera installation is Windows-only".into())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn run_elevated(_exe: &Path, _params: &str) -> Result<(), String> {
+    Err("elevation is Windows-only".into())
 }

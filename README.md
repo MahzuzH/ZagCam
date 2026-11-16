@@ -2,7 +2,7 @@
 
 Lightweight virtual camera that blurs or replaces your webcam background. Pick "ZagCam" as your camera in Discord, Meet, Teams, or anything else that reads a camera from the OS — no per-app setup.
 
-**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), Sprint 12 tooling ready, Sprint 13 beta package ready; M5 sprints 14–16 implemented (idle RAM exception open), 17–18 pending.** Capture, blur, image/GIF/video backgrounds, presets/hotkeys, live preview, adjustments, the tray app, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it.
+**Status: M2 and M3 done; M4 sprints 10–11 done (with documented exceptions), Sprint 12 tooling ready, Sprint 13 beta package ready; M5 sprints 14–17 implemented (idle RAM and unsigned-installer exceptions open), Sprint 18 pending.** Capture, blur, image/GIF/video backgrounds, presets/hotkeys, live preview, adjustments, the tray app, an MSI installer, a signed update manifest, and an own Media Foundation virtual camera are implemented. The engine publishes frames into that camera only while an app is reading it.
 
 ## Why
 
@@ -23,17 +23,20 @@ Lightweight virtual camera that blurs or replaces your webcam background. Pick "
 - Physical camera opened only while the virtual camera is in use.
 - Quality modes (Eco / Balanced / Quality) controlling inference rate and resolution.
 
-**M5 (implemented in sprints 14–16)**
+**M5 (implemented in sprints 14–17)**
 
 - GIF and looping video backgrounds, bounded to 64 MB for GIFs.
 - Named presets, tray switching, and global hotkeys (Ctrl+Alt+B/N/O).
 - Live preview in settings.
 - Mirror/flip, basic brightness and contrast.
 - Optional start with Windows.
+- Per-machine MSI installer with the model and provider bundled.
+- Signed update manifest, version check, verified download, and install after approval.
 
 **v1.0 remaining**
 
-- Digitally signed installer and update mechanism (sprint 17).
+- Windows code signing for the installer and exe. The current release is unsigned; SmartScreen
+  warnings are expected. Update manifests are still signed and verified.
 
 **Later:** Linux, macOS, Windows 10 (if demand), GPU/NPU acceleration, higher-quality matting model.
 
@@ -102,7 +105,7 @@ All processing is local. No account or login required. Telemetry is opt-in and n
 3. **M2** — Own virtual camera (Windows 11): provider + engine over shared memory, detected by Chrome, Discord, Teams. *(done)*
 4. **M3** — UI and MVP features: tray, blur and image modes, saved settings, camera opened on demand. *(done)*
 5. **M4** — Optimization and closed beta: performance tuning, compatibility matrix, stability fixes. *(sprints 10–11 done; 12–13 tooling/package ready)*
-6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, signed installer, update mechanism. *(sprints 14–16 implemented; 17–18 pending)*
+6. **M5** — v1.0 (Windows): video backgrounds, presets and hotkeys, installer, update mechanism. *(sprints 14–17 implemented; 18 pending; code signing exception)*
 7. **M6** — Linux, then **M7** — macOS.
 
 ## Build and usage
@@ -121,7 +124,9 @@ cargo run --release -- --sink mfvcam --mode blur   # feed ZagCam's own camera
 cargo run --release -- --sink vcam --features sink-vcam   # feed the OBS virtual camera
 ```
 
-Prefer `--release`: debug builds are an order of magnitude slower.
+Prefer `--release`: debug builds are an order of magnitude slower. When launching
+`target\release\ZagCam.exe` directly, run it from the repository root or copy `models` next to the
+exe; the MSI packages the model correctly.
 
 ### Model
 
@@ -154,17 +159,52 @@ releases it after the client stops. Without an engine, the provider shows its te
 which is a quick end-to-end check. `zagcam vcam feed` still publishes test frames for
 provider-only checks. Provider diagnostics go to `%ProgramData%\ZagCam\vcam-<account>.log`.
 
-### Beta package (M4 sprint 13)
+### Installer and updates (M5 sprint 17)
+
+```sh
+powershell -ExecutionPolicy Bypass -File tools\build-installer.ps1
+powershell -ExecutionPolicy Bypass -File tools\release.ps1
+```
+
+The installer build needs the WiX v7 CLI (`winget install WiXToolset.WiXCLI`).
+`build-installer.ps1` produces `dist\ZagCam-<version>.msi` (per-machine, unsigned). The MSI bundles
+the exe, provider DLL, model, notices, quickstart, and known issues. Installing or upgrading it
+registers the virtual camera and leaves `%APPDATA%\ZagCam` untouched.
+
+`release.ps1` produces the GitHub release assets in `dist\release\v<version>\`:
+`ZagCam-<version>.msi`, `latest.json`, `latest.json.sig`, and `SHA256SUMS`. Publish the release as
+a normal release (not a pre-release) so the `/releases/latest/download/` feed resolves. The
+manifest is signed with the Ed25519 key in `.secrets\zagcam-update.key`; the app rejects a missing
+or invalid signature. Generate a key once with:
+
+```sh
+cargo run -p zagcam-sign-manifest --release -- keygen .secrets\zagcam-update.key
+```
+
+Back up the private key and keep it out of git. The public key lives in `src/update.rs`.
+
+Update checks use the latest GitHub release:
+
+```sh
+.\target\release\ZagCam.exe update check
+.\target\release\ZagCam.exe update check --feed .\dist\release\v0.5.0-beta.1\latest.json
+```
+
+The tray menu also has **Check for updates...**. It downloads only after approval, verifies the
+manifest signature and SHA-256, then launches the MSI. The installer is currently unsigned, so
+Windows shows **Unknown publisher** and SmartScreen may require **More info → Run anyway**.
+Verification helpers: `tools\verify-installer.ps1` and `tools\verify-update.ps1`.
+
+### Beta zip (M4 sprint 13)
 
 ```sh
 powershell -ExecutionPolicy Bypass -File tools\package-beta.ps1
 ```
 
-Produces `dist\ZagCam-<version>.zip` (unsigned) with the exe, provider DLL, model, notices,
-quickstart, feedback docs, known issues, and a log collector, plus a SHA-256. The visible beta
-version is `0.5.0-beta.1` (`ZagCam.exe --version`). Install/verify helpers:
-`tools/verify-install.ps1` (package checks, and elevated install/reinstall/uninstall checks),
-`tools/collect-logs.ps1`, `tools/soak.ps1`. Test tracking: `compat/matrix.md`,
+Produces `dist\ZagCam-<version>.zip` with the exe, provider DLL, model, notices, quickstart,
+feedback docs, known issues, and a log collector. The visible version is `0.5.0-beta.1`
+(`ZagCam.exe --version`). Use `tools\verify-install.ps1` for the portable package and
+`tools\collect-logs.ps1` / `tools\soak.ps1` for diagnostics. Test tracking: `compat/matrix.md`,
 `compat/edge-cases.md`, `beta/tester-tracker.csv`.
 
 ### OBS virtual camera (fallback)

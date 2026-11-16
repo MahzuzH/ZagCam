@@ -1,6 +1,8 @@
 //! The tray app: a tray icon, the settings window, and the engine worker it drives.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui;
@@ -15,6 +17,7 @@ use crate::hotkeys::{HotkeyEvent, Hotkeys};
 use crate::settings::{
     MAX_ADJUST, MAX_PRESETS, Mode, Preset, Quality, Settings, validate_background,
 };
+use crate::update;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -28,6 +31,7 @@ pub fn run(model: PathBuf) -> Result<(), String> {
     }
     let camera = VirtualCamera::start()?;
     let engine = Engine::spawn(settings.clone(), model)?;
+    let pending_install = Arc::new(Mutex::new(None));
 
     let tray = Tray::build(&settings);
     let visible = true;
@@ -38,16 +42,31 @@ pub fn run(model: PathBuf) -> Result<(), String> {
             .with_visible(visible),
         ..Default::default()
     };
+    let pending_for_app = Arc::clone(&pending_install);
     let result = eframe::run_native(
         "ZagCam",
         options,
         Box::new(move |cc| {
-            let app = App::new(cc, settings, engine, tray, visible);
+            let app = App::new(cc, settings, engine, tray, visible, pending_for_app);
             Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     );
     drop(camera);
+    if let Some(msi) = pending_install.lock().ok().and_then(|mut slot| slot.take())
+        && let Err(why) = update::install(&msi)
+    {
+        rfd::MessageDialog::new()
+            .set_title("ZagCam update")
+            .set_description(format!("The update could not be installed: {why}"))
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
     result.map_err(|why| format!("the settings window failed: {why}"))
+}
+
+enum UpdateEvent {
+    Checked(Result<update::Check, String>),
+    Downloaded(Result<PathBuf, String>),
 }
 
 struct App {
@@ -67,6 +86,9 @@ struct App {
     preset_name: String,
     preset_cursor: usize,
     preview_texture: Option<egui::TextureHandle>,
+    update_rx: Option<Receiver<UpdateEvent>>,
+    update_busy: bool,
+    pending_install: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl App {
@@ -76,6 +98,7 @@ impl App {
         engine: Engine,
         tray: Option<Tray>,
         window_visible: bool,
+        pending_install: Arc<Mutex<Option<PathBuf>>>,
     ) -> Self {
         let cameras = capture::list().unwrap_or_default();
         let device_index = settings.camera_index(&cameras).unwrap_or(0);
@@ -101,6 +124,9 @@ impl App {
             preset_name: String::new(),
             preset_cursor: 0,
             preview_texture: None,
+            update_rx: None,
+            update_busy: false,
+            pending_install,
         }
     }
 
@@ -157,6 +183,88 @@ impl App {
             }
         } else {
             self.hotkeys = None;
+        }
+    }
+
+    fn check_for_updates(&mut self) {
+        if self.update_busy {
+            self.message = Some("An update check is already running".to_string());
+            return;
+        }
+        self.update_busy = true;
+        self.error = None;
+        self.message = Some("Checking for updates...".to_string());
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        let feed = update::feed_url();
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateEvent::Checked(update::check(&feed)));
+        });
+    }
+
+    fn download_update(&mut self, update: update::Update) {
+        self.update_busy = true;
+        self.error = None;
+        self.message = Some(format!("Downloading ZagCam {}...", update.version));
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(UpdateEvent::Downloaded(update::download(&update)));
+        });
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.update_rx.as_ref() else {
+            return;
+        };
+        let event = match rx.try_recv() {
+            Ok(event) => event,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.update_rx = None;
+                self.update_busy = false;
+                return;
+            }
+        };
+        self.update_rx = None;
+        match event {
+            UpdateEvent::Checked(Ok(update::Check::UpToDate { current, latest })) => {
+                self.update_busy = false;
+                self.message = Some(format!("ZagCam {current} is up to date (latest {latest})"));
+            }
+            UpdateEvent::Checked(Ok(update::Check::Available(update))) => {
+                self.update_busy = false;
+                let answer = rfd::MessageDialog::new()
+                    .set_title("ZagCam update")
+                    .set_description(format!(
+                        "ZagCam {} is available. Download and install it now?",
+                        update.version
+                    ))
+                    .set_buttons(rfd::MessageButtons::OkCancel)
+                    .show();
+                if answer == rfd::MessageDialogResult::Ok {
+                    self.download_update(update);
+                } else {
+                    self.message = Some("Update skipped".to_string());
+                }
+            }
+            UpdateEvent::Checked(Err(why)) => {
+                self.update_busy = false;
+                self.error = Some(format!("update check failed: {why}"));
+            }
+            UpdateEvent::Downloaded(Ok(msi)) => {
+                self.update_busy = false;
+                if let Ok(mut slot) = self.pending_install.lock() {
+                    *slot = Some(msi);
+                }
+                self.allow_exit = true;
+                self.engine.shutdown();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            UpdateEvent::Downloaded(Err(why)) => {
+                self.update_busy = false;
+                self.error = Some(format!("update download failed: {why}"));
+            }
         }
     }
 
@@ -320,6 +428,7 @@ impl App {
                 "off" => self.set_mode(ctx, Mode::Off),
                 "blur" => self.set_mode(ctx, Mode::Blur),
                 "image" => self.set_mode(ctx, Mode::Image),
+                "update" => self.check_for_updates(),
                 "open" => self.show_window(ctx),
                 "quit" => {
                     self.allow_exit = true;
@@ -539,6 +648,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_tray(ctx);
+        self.poll_update(ctx);
         self.handle_hotkeys(ctx);
         self.engine.set_preview_wanted(self.window_visible);
         if ctx.input(|input| input.viewport().close_requested()) {
@@ -610,6 +720,7 @@ fn menu_for(settings: &Settings) -> Option<Menu> {
     let blur = MenuItem::with_id("blur", "Blur", true, None);
     let image = MenuItem::with_id("image", "Background", true, None);
     let open = MenuItem::with_id("open", "Settings...", true, None);
+    let update = MenuItem::with_id("update", "Check for updates...", true, None);
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     menu.append_items(&[&enable, &off, &blur, &image]).ok()?;
     if !settings.presets.is_empty() {
@@ -625,6 +736,7 @@ fn menu_for(settings: &Settings) -> Option<Menu> {
         }
     }
     menu.append(&PredefinedMenuItem::separator()).ok()?;
+    menu.append(&update).ok()?;
     menu.append(&open).ok()?;
     menu.append(&quit).ok()?;
     Some(menu)

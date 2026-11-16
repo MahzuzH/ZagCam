@@ -1,0 +1,10 @@
+[package]
+name = "zagcam-sign-manifest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ed25519-dalek = "2"
+getrandom = "0.2"
+hex = "0.4"
