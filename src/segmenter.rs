@@ -1,6 +1,8 @@
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub const IN_W: usize = 256;
 pub const IN_H: usize = 144;
@@ -11,9 +13,17 @@ pub struct Segmenter {
     output_name: String,
 }
 
+/// ORT allows one environment per process; keep it alive for the app's lifetime.
+fn environment() -> Result<Environment, String> {
+    static ENVIRONMENT: OnceLock<Result<Environment, String>> = OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| ort::init().build().map_err(|why| format!("onnxruntime init: {why}")))
+        .clone()
+}
+
 impl Segmenter {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let env = ort::init().build().map_err(|why| format!("onnxruntime init: {why}"))?;
+        let env = environment()?;
         let builder =
             Session::builder(&env).map_err(|why| format!("onnxruntime session: {why}"))?;
         let mut builder = builder
@@ -44,5 +54,19 @@ impl Segmenter {
         }
         mask.copy_from_slice(&data[..mask.len()]);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Segmenter;
+    use std::path::Path;
+
+    #[test]
+    fn sessions_reuse_the_process_environment() {
+        let model = Path::new("models/selfie_segmentation_landscape.onnx");
+        let first = Segmenter::load(model).expect("first session");
+        drop(first);
+        Segmenter::load(model).expect("second session after the first was dropped");
     }
 }
