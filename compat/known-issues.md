@@ -1,6 +1,6 @@
 # Known issues and accepted limitations
 
-Updated for the `0.5.0-beta.1` beta package. This list is shared by Sprint 12 and the beta.
+Updated for the `1.0.0` release. This list covers the accepted limitations of the Windows 11 build.
 
 | ID | Severity | Status | Summary |
 | --- | --- | --- | --- |
